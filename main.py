@@ -1,0 +1,103 @@
+import sys
+import logging
+from logging import handlers
+from pathlib import Path
+from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget, QWidget, QMessageBox
+
+from database import Database
+from event_bus import EventBus
+from ui.dashboard_tab import DashboardTab
+from ui.warehouse_tab import WarehouseTab
+from ui.counterparties_tab import CounterpartiesTab
+from ui.orders_tab import OrdersTab
+from ui.equipment_tab import EquipmentTab
+from ui.replacement_history_tab import ReplacementHistoryTab
+from ui.tasks_tab import TasksTab
+from ui.knives_tab import KnivesTab
+
+def setup_logging_and_paths():
+    """Настраивает логирование и создает необходимые каталоги."""
+    log_dir = Path("./logs")
+    log_dir.mkdir(exist_ok=True)
+    log_file = log_dir / "app.log"
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(process)d:%(thread)d - %(levelname)s - %(message)s',
+        handlers=[
+            logging.StreamHandler(),
+            handlers.RotatingFileHandler(
+                log_file, maxBytes=5*1024*1024, backupCount=10, encoding='utf-8'
+            )
+        ]
+    )
+    Path("./data").mkdir(exist_ok=True)
+    Path("./backup").mkdir(exist_ok=True)
+
+class MainWindow(QMainWindow):
+    def __init__(self, db, event_bus):
+        super().__init__()
+        self.db = db
+        self.event_bus = event_bus
+        self.setWindowTitle("Система управления запчастями")
+        self.setGeometry(100, 100, 1200, 800)
+        self.tabs = QTabWidget()
+        self.setCentralWidget(self.tabs)
+        self.init_tabs()
+
+    def init_tabs(self):
+        self.dashboard_tab = DashboardTab(self.db, self.event_bus, self)
+        self.tabs.addTab(self.dashboard_tab, "Панель")
+        
+        self.orders_tab = OrdersTab(self.db, self.event_bus, self)
+        self.tabs.addTab(self.orders_tab, "Заказы")
+
+        self.counterparties_tab = CounterpartiesTab(self.db, self.event_bus, self)
+        self.tabs.addTab(self.counterparties_tab, "Контрагенты")
+        
+        self.equipment_tab = EquipmentTab(self.db, self.event_bus, self)
+        self.tabs.addTab(self.equipment_tab, "Оборудование")
+
+        self.warehouse_tab = WarehouseTab(self.db, self.event_bus, self)
+        self.tabs.addTab(self.warehouse_tab, "Склад")
+
+        self.replacement_history_tab = ReplacementHistoryTab(self.db, self.event_bus, self)
+        self.tabs.addTab(self.replacement_history_tab, "История замен")
+        
+        self.tasks_tab = TasksTab(self.db, self.event_bus, self)
+        self.tabs.addTab(self.tasks_tab, "Задачи")
+        
+        self.knives_tab = KnivesTab(self.db, self.event_bus, self)
+        self.tabs.addTab(self.knives_tab, "Ножи")
+
+    def closeEvent(self, event):
+        logging.info("Application closing...")
+        self.db.disconnect()
+        event.accept()
+
+def main():
+    app = QApplication(sys.argv)
+
+    setup_logging_and_paths()
+    logging.info("Application starting...")
+
+    db_path = Path('./data/app.db')
+    backup_dir = Path('./backup')
+
+    try:
+        db = Database(db_path=str(db_path), backup_dir=str(backup_dir))
+        db.connect()
+    except Exception as e:
+        logging.critical(f"Критическая ошибка при инициализации базы данных: {e}", exc_info=True)
+        QMessageBox.critical(None, "Ошибка базы данных", f"Не удалось инициализировать базу данных.\n\n{e}\n\nСм. лог-файл для подробностей.")
+        sys.exit(1)
+    
+    event_bus = EventBus()
+
+    window = MainWindow(db, event_bus)
+    window.show()
+
+    sys.exit(app.exec())
+
+if __name__ == '__main__':
+    main()
+
