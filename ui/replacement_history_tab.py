@@ -1,7 +1,7 @@
 import logging
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QTableView, QHeaderView,
-                             QAbstractItemView, QGroupBox, QFormLayout,
-                             QDateEdit, QComboBox, QPushButton, QMessageBox, QMenu, QHBoxLayout)
+                             QAbstractItemView, QGroupBox, QDateEdit, QComboBox,
+                             QPushButton, QMessageBox, QMenu, QHBoxLayout, QLabel)
 from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QDate
 from PySide6.QtGui import QAction
 
@@ -66,7 +66,7 @@ class ReplacementHistoryTab(QWidget):
         
         filters_group = QGroupBox("Фильтры")
         filters_layout = QHBoxLayout()
-        form_layout = QFormLayout()
+        filters_layout.setSpacing(16)
 
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setCalendarPopup(True)
@@ -80,12 +80,36 @@ class ReplacementHistoryTab(QWidget):
         self.delete_button = QPushButton("Удалить запись")
         self.delete_button.clicked.connect(self.delete_selected_replacement)
 
-        form_layout.addRow("Период с:", self.start_date_edit)
-        form_layout.addRow("по:", self.end_date_edit)
-        form_layout.addRow("Категория запчасти:", self.part_category_combo)
-        form_layout.addRow("Оборудование:", self.equipment_combo)
-        
-        filters_layout.addLayout(form_layout)
+        period_container = QWidget()
+        period_container_layout = QVBoxLayout(period_container)
+        period_container_layout.setContentsMargins(0, 0, 0, 0)
+        period_container_layout.setSpacing(4)
+        period_label = QLabel("Период")
+        period_label.setStyleSheet("font-weight: 500;")
+        period_inputs_layout = QHBoxLayout()
+        period_inputs_layout.setContentsMargins(0, 0, 0, 0)
+        period_inputs_layout.setSpacing(6)
+        period_inputs_layout.addWidget(QLabel("с:"))
+        period_inputs_layout.addWidget(self.start_date_edit)
+        period_inputs_layout.addWidget(QLabel("по:"))
+        period_inputs_layout.addWidget(self.end_date_edit)
+        period_container_layout.addWidget(period_label)
+        period_container_layout.addLayout(period_inputs_layout)
+
+        def build_single_filter(label_text, widget):
+            container = QWidget()
+            container_layout = QVBoxLayout(container)
+            container_layout.setContentsMargins(0, 0, 0, 0)
+            container_layout.setSpacing(4)
+            label = QLabel(label_text)
+            label.setStyleSheet("font-weight: 500;")
+            container_layout.addWidget(label)
+            container_layout.addWidget(widget)
+            return container
+
+        filters_layout.addWidget(period_container)
+        filters_layout.addWidget(build_single_filter("Категория запчасти", self.part_category_combo))
+        filters_layout.addWidget(build_single_filter("Оборудование", self.equipment_combo))
         filters_layout.addStretch()
         filters_layout.addWidget(self.delete_button)
         

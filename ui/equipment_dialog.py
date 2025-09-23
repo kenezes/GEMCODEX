@@ -1,6 +1,8 @@
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QLineEdit,
                              QDialogButtonBox, QMessageBox, QComboBox)
 
+from .utils import move_equipment_folder_on_rename
+
 class EquipmentDialog(QDialog):
     def __init__(self, db, event_bus, category_id=None, parent_id=None, equipment_id=None, parent=None):
         super().__init__(parent)
@@ -9,6 +11,8 @@ class EquipmentDialog(QDialog):
         self.equipment_id = equipment_id
         self.initial_category_id = category_id
         self.initial_parent_id = parent_id
+        self.original_name = None
+        self.original_sku = None
 
         self.setWindowTitle("Редактирование оборудования" if self.equipment_id else "Новое оборудование")
         
@@ -64,6 +68,8 @@ class EquipmentDialog(QDialog):
         if data:
             self.name_edit.setText(data['name'])
             self.sku_edit.setText(data['sku'] or "")
+            self.original_name = data['name']
+            self.original_sku = data['sku'] or ""
             
             cat_index = self.category_combo.findData(data['category_id'])
             if cat_index != -1: self.category_combo.setCurrentIndex(cat_index)
@@ -91,6 +97,10 @@ class EquipmentDialog(QDialog):
             success, message = self.db.add_equipment(name, sku, category_id, parent_id)
 
         if success:
+            if self.equipment_id:
+                move_equipment_folder_on_rename(self.original_name, self.original_sku, name, sku, self)
+                self.original_name = name
+                self.original_sku = sku or ""
             self.event_bus.emit("equipment.changed")
             super().accept()
         else:
