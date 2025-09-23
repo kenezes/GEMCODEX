@@ -54,7 +54,7 @@ class WarehouseTab(QWidget):
         self.table_view = QTableView()
         self.table_model = TableModel()
         
-        self.proxy_model = CustomSortFilterProxyModel()
+        self.proxy_model = CustomSortFilterProxyModel(self.db, self)
         self.proxy_model.setSourceModel(self.table_model)
         self.proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
         
@@ -220,10 +220,11 @@ class TableModel(QAbstractTableModel):
         return self.data(index, role=Qt.UserRole)
 
 class CustomSortFilterProxyModel(QSortFilterProxyModel):
-    def __init__(self, parent=None):
+    def __init__(self, db=None, parent=None):
         super().__init__(parent)
         self.search_text = ""
         self.category_id = -1
+        self._db = db
 
     def set_search_text(self, text):
         self.search_text = text.lower()
@@ -239,7 +240,7 @@ class CustomSortFilterProxyModel(QSortFilterProxyModel):
             cat_name = self.sourceModel().data(cat_index)
             # Необходимо получить ID категории из данных, если это возможно,
             # но для простоты фильтруем по имени категории
-            categories = self.parent().db.get_part_categories()
+            categories = self._db.get_part_categories() if self._db else []
             current_category_name = ""
             for cat in categories:
                 if cat['id'] == self.category_id:
