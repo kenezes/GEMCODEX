@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QMode
 from PySide6.QtGui import QAction
 
 from ui.utils import db_string_to_ui_string
+from .knife_sharpen_history_dialog import KnifeSharpenHistoryDialog
 from .sharpen_knives_dialog import SharpenKnivesDialog
 
 class KnivesTableModel(QAbstractTableModel):
@@ -67,13 +68,16 @@ class KnivesTab(QWidget):
     def _setup_toolbar(self):
         self.toolbar = QToolBar()
         self.sharpen_button = QPushButton("Отправить на заточку...")
+        self.history_button = QPushButton("История заточек")
         self.refresh_button = QPushButton("Обновить")
         self.toolbar.addWidget(self.sharpen_button)
+        self.toolbar.addWidget(self.history_button)
         widget = QWidget()
         widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.toolbar.addWidget(widget)
         self.toolbar.addWidget(self.refresh_button)
         self.sharpen_button.clicked.connect(self.sharpen_selected_knives)
+        self.history_button.clicked.connect(self.show_sharpen_history)
         self.refresh_button.clicked.connect(self.refresh_data)
 
     def _setup_table(self):
@@ -146,4 +150,8 @@ class KnivesTab(QWidget):
                 break
         
         self.event_bus.emit("knives.changed")
+
+    def show_sharpen_history(self):
+        dialog = KnifeSharpenHistoryDialog(self.db, self.event_bus, self)
+        dialog.exec()
 

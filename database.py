@@ -798,3 +798,44 @@ class Database:
             logging.error(f"Ошибка транзакции при заточке ножей: {e}", exc_info=True)
             return False, f"Ошибка транзакции: {e}"
 
+    def get_knife_sharpen_history(self):
+        query = """
+            SELECT l.id, l.part_id, l.date, l.comment, p.name AS part_name, p.sku AS part_sku
+            FROM knife_sharpen_log l
+            JOIN parts p ON l.part_id = p.id
+            ORDER BY l.date DESC, l.id DESC
+        """
+        return self.fetchall(query)
+
+    def delete_knife_sharpen_entry(self, entry_id):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute("SELECT part_id FROM knife_sharpen_log WHERE id = ?", (entry_id,))
+                row = cursor.fetchone()
+                if not row:
+                    return False, "Запись не найдена."
+
+                part_id = row["part_id"]
+                cursor.execute("DELETE FROM knife_sharpen_log WHERE id = ?", (entry_id,))
+
+                cursor.execute(
+                    "SELECT MAX(date) as max_date, COUNT(*) as cnt FROM knife_sharpen_log WHERE part_id = ?",
+                    (part_id,),
+                )
+                stats = cursor.fetchone()
+                last_date = stats["max_date"] if stats else None
+                total = stats["cnt"] if stats else 0
+                cursor.execute(
+                    "UPDATE knife_tracking SET last_sharpen_date = ?, total_sharpenings = ? WHERE part_id = ?",
+                    (last_date, total, part_id),
+                )
+
+            return True, "Запись удалена."
+        except sqlite3.Error as exc:
+            logging.error("Ошибка удаления записи истории заточек", exc_info=True)
+            return False, f"Ошибка базы данных: {exc}"
+

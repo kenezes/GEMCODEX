@@ -2,8 +2,9 @@ import logging
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QLineEdit, 
                                QPushButton, QMessageBox, QSpinBox, QDoubleSpinBox,
                                QComboBox, QHBoxLayout)
-from PySide6.QtGui import QDoubleValidator
 from PySide6.QtCore import QLocale
+
+from .utils import move_part_folder_on_rename
 
 class PartDialog(QDialog):
     def __init__(self, db, event_bus, part_id=None, parent=None):
@@ -11,6 +12,8 @@ class PartDialog(QDialog):
         self.db = db
         self.event_bus = event_bus
         self.part_id = part_id
+        self.original_name = None
+        self.original_sku = None
 
         self.setWindowTitle("Редактирование запчасти" if self.part_id else "Добавление запчасти")
         
@@ -75,6 +78,8 @@ class PartDialog(QDialog):
             self.qty_input.setValue(part['qty'])
             self.min_qty_input.setValue(part['min_qty'])
             self.price_input.setValue(part['price'])
+            self.original_name = part['name']
+            self.original_sku = part['sku']
             
             category_id = part.get('category_id')
             if category_id:
@@ -110,6 +115,10 @@ class PartDialog(QDialog):
 
             if success:
                 logging.info(f"Part data saved successfully for ID: {self.part_id or 'new'}")
+                if self.part_id:
+                    move_part_folder_on_rename(self.original_name, self.original_sku, name, sku, self)
+                    self.original_name = name
+                    self.original_sku = sku
                 # Используем правильное имя метода 'emit'
                 self.event_bus.emit("parts.changed")
                 super().accept()

@@ -9,6 +9,7 @@ from .equipment_category_manager_dialog import EquipmentCategoryManagerDialog
 from .equipment_dialog import EquipmentDialog
 from .attach_part_dialog import AttachPartDialog
 from .replacement_dialog import ReplacementDialog
+from .utils import open_part_folder as open_part_folder_fs, open_equipment_folder as open_equipment_folder_fs
 
 class EquipmentTab(QWidget):
     def __init__(self, db, event_bus, parent=None):
@@ -37,10 +38,12 @@ class EquipmentTab(QWidget):
         self.add_equipment_button = QPushButton("+ Оборудование")
         self.edit_equipment_button = QPushButton("Редактировать")
         self.delete_equipment_button = QPushButton("Удалить")
+        self.open_equipment_folder_button = QPushButton("Папка")
         tree_buttons_layout.addWidget(self.manage_categories_button)
         tree_buttons_layout.addWidget(self.add_equipment_button)
         tree_buttons_layout.addWidget(self.edit_equipment_button)
         tree_buttons_layout.addWidget(self.delete_equipment_button)
+        tree_buttons_layout.addWidget(self.open_equipment_folder_button)
         tree_buttons_layout.addStretch()
 
         self.tree = QTreeWidget()
@@ -83,6 +86,7 @@ class EquipmentTab(QWidget):
         self.delete_equipment_button.clicked.connect(self.delete_equipment)
         self.tree.currentItemChanged.connect(self.on_tree_selection_changed)
         self.add_part_button.clicked.connect(self.attach_part)
+        self.open_equipment_folder_button.clicked.connect(self.open_selected_equipment_folder)
 
     def update_buttons_state(self):
         selected_item = self.tree.currentItem()
@@ -95,6 +99,7 @@ class EquipmentTab(QWidget):
         self.edit_equipment_button.setEnabled(is_item_selected)
         self.delete_equipment_button.setEnabled(is_item_selected)
         self.add_part_button.setEnabled(is_equipment_selected)
+        self.open_equipment_folder_button.setEnabled(is_equipment_selected)
 
     def load_tree_data(self, *args, **kwargs):
         self.tree.clear()
@@ -122,7 +127,12 @@ class EquipmentTab(QWidget):
     def _add_equipment_node(self, parent_item, equipment_data, equipment_by_parent):
         display_text = f"{equipment_data['name']} ({equipment_data['sku'] or 'б/а'})"
         eq_item = QTreeWidgetItem(parent_item, [display_text])
-        eq_item.setData(0, Qt.UserRole, {'type': 'equipment', 'id': equipment_data['id']})
+        eq_item.setData(0, Qt.UserRole, {
+            'type': 'equipment',
+            'id': equipment_data['id'],
+            'name': equipment_data['name'],
+            'sku': equipment_data.get('sku'),
+        })
 
         children = equipment_by_parent.get(equipment_data['id'], [])
         for child in children:
@@ -171,8 +181,12 @@ class EquipmentTab(QWidget):
             replace_button.clicked.connect(lambda _, p=part: self.replace_part(p))
             detach_button.clicked.connect(lambda _, epid=part['equipment_part_id'], pn=part['part_name']: self.detach_part(epid, pn))
 
+            folder_button = QPushButton("Папка")
+            folder_button.clicked.connect(lambda _, pn=part['part_name'], sku=part['part_sku']: self.open_part_folder_location(pn, sku))
+
             actions_layout.addWidget(replace_button)
             actions_layout.addWidget(detach_button)
+            actions_layout.addWidget(folder_button)
             actions_layout.addStretch()
             
             self.parts_table.setCellWidget(row, 4, actions_widget)
@@ -271,6 +285,21 @@ class EquipmentTab(QWidget):
         """Вызывает диалог замены запчасти."""
         dialog = ReplacementDialog(self.db, self.event_bus, part_data, self)
         dialog.exec()
+
+    def open_part_folder_location(self, part_name, part_sku):
+        open_part_folder_fs(part_name, part_sku)
+
+    def open_selected_equipment_folder(self):
+        selected_item = self.tree.currentItem()
+        if not selected_item:
+            return
+
+        item_data = selected_item.data(0, Qt.UserRole) or {}
+        if item_data.get('type') != 'equipment':
+            QMessageBox.information(self, "Папка оборудования", "Выберите оборудование в списке.")
+            return
+
+        open_equipment_folder_fs(item_data.get('name'), item_data.get('sku'))
 
     def on_equipment_parts_changed(self, equipment_id):
         logging.info(f"Event 'equipment_parts_changed' received for equipment_id: {equipment_id}")
