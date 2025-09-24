@@ -64,6 +64,7 @@ class AttachPartDialog(QDialog):
 
         self.event_bus.subscribe("parts.changed", self.on_parts_changed)
         self.all_parts = []
+        self._row_types: list[str] = []
         self.load_parts()
 
     def load_parts(self):
@@ -77,6 +78,7 @@ class AttachPartDialog(QDialog):
 
     def _display_parts(self, parts, filter_text=""):
         self.table_model.removeRows(0, self.table_model.rowCount())
+        self._row_types = []
         filter_text = (filter_text or "").strip().lower()
 
         current_category = None
@@ -98,6 +100,7 @@ class AttachPartDialog(QDialog):
                     item.setFlags(Qt.ItemIsEnabled)
 
                 self.table_model.appendRow([header_item, *placeholders])
+                self._row_types.append('header')
                 current_category = category_name
 
             row = [
@@ -107,8 +110,24 @@ class AttachPartDialog(QDialog):
             ]
             row[0].setData(part['id'], Qt.UserRole)
             self.table_model.appendRow(row)
+            self._row_types.append('part')
 
         self.table_view.resizeColumnsToContents()
+        self._update_vertical_header_numbers()
+
+    def _update_vertical_header_numbers(self):
+        part_counter = 1
+        for row, row_type in enumerate(self._row_types):
+            if row_type == 'header':
+                label = ""
+            else:
+                label = str(part_counter)
+                part_counter += 1
+            self.table_model.setHeaderData(row, Qt.Vertical, label, Qt.DisplayRole)
+            if label:
+                self.table_model.setHeaderData(row, Qt.Vertical, Qt.AlignCenter, Qt.TextAlignmentRole)
+            else:
+                self.table_model.setHeaderData(row, Qt.Vertical, Qt.AlignLeft, Qt.TextAlignmentRole)
 
     def add_new_part(self):
         dialog = PartDialog(self.db, self.event_bus, parent=self)
