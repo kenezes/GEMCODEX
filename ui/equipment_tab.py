@@ -158,17 +158,36 @@ class EquipmentTab(QWidget):
             return
 
         parts = self.db.get_parts_for_equipment(equipment_id)
-        self.parts_table.setRowCount(len(parts))
-        for row, part in enumerate(parts):
+        self.parts_table.setRowCount(0)
+        self.parts_table.clearSpans()
+
+        current_category = None
+        row_index = 0
+        for part in parts:
             # Добавляем ID оборудования в словарь с данными о запчасти
             part['equipment_id'] = equipment_id
 
-            self.parts_table.setItem(row, 0, QTableWidgetItem(part['part_name']))
-            self.parts_table.setItem(row, 1, QTableWidgetItem(part['part_sku']))
-            self.parts_table.setItem(row, 2, QTableWidgetItem(str(part['installed_qty'])))
-            
+            category_name = part.get('category_name') or "Без категории"
+            if category_name != current_category:
+                self.parts_table.insertRow(row_index)
+                header_item = QTableWidgetItem(category_name)
+                header_font = header_item.font()
+                header_font.setBold(True)
+                header_item.setFont(header_font)
+                header_item.setFlags(Qt.ItemIsEnabled)
+                header_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                self.parts_table.setItem(row_index, 0, header_item)
+                self.parts_table.setSpan(row_index, 0, 1, self.parts_table.columnCount())
+                current_category = category_name
+                row_index += 1
+
+            self.parts_table.insertRow(row_index)
+            self.parts_table.setItem(row_index, 0, QTableWidgetItem(part['part_name']))
+            self.parts_table.setItem(row_index, 1, QTableWidgetItem(part['part_sku'] or ""))
+            self.parts_table.setItem(row_index, 2, QTableWidgetItem(str(part['installed_qty'])))
+
             last_replacement_str = part.get('last_replacement_date', '')
-            self.parts_table.setItem(row, 3, QTableWidgetItem(last_replacement_str))
+            self.parts_table.setItem(row_index, 3, QTableWidgetItem(last_replacement_str))
 
             # Кнопки действий
             actions_widget = QWidget()
@@ -188,8 +207,9 @@ class EquipmentTab(QWidget):
             actions_layout.addWidget(detach_button)
             actions_layout.addWidget(folder_button)
             actions_layout.addStretch()
-            
-            self.parts_table.setCellWidget(row, 4, actions_widget)
+
+            self.parts_table.setCellWidget(row_index, 4, actions_widget)
+            row_index += 1
 
     def manage_categories(self):
         dialog = EquipmentCategoryManagerDialog(self.db, self)

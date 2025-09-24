@@ -1,8 +1,8 @@
 import logging
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, 
+from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
                                QPushButton, QTableView, QMessageBox, QAbstractItemView,
                                QSpinBox)
-from PySide6.QtCore import Qt, QSortFilterProxyModel
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QStandardItemModel, QStandardItem
 
 from .part_dialog import PartDialog
@@ -35,16 +35,11 @@ class AttachPartDialog(QDialog):
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table_view.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table_view.setSortingEnabled(False)
+
         self.table_model = QStandardItemModel(self)
         self.table_model.setHorizontalHeaderLabels(["Наименование", "Артикул", "На складе, шт."])
-        
-        self.proxy_model = QSortFilterProxyModel(self)
-        self.proxy_model.setSourceModel(self.table_model)
-        self.proxy_model.setFilterKeyColumn(-1)
-        self.proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
-
-        self.table_view.setModel(self.proxy_model)
-        self.table_view.setSortingEnabled(True)
+        self.table_view.setModel(self.table_model)
         self.layout.addWidget(self.table_view)
 
         qty_layout = QHBoxLayout()
@@ -68,26 +63,53 @@ class AttachPartDialog(QDialog):
         self.layout.addLayout(self.button_box)
 
         self.event_bus.subscribe("parts.changed", self.on_parts_changed)
+        self.all_parts = []
         self.load_parts()
-        
+
     def load_parts(self):
         """Загружает список НЕПРИВЯЗАННЫХ запчастей из БД в таблицу."""
-        self.table_model.removeRows(0, self.table_model.rowCount())
-        # Используем новый метод для получения только доступных для привязки запчастей
         parts = self.db.get_unattached_parts(self.equipment_id)
+        self.all_parts = parts
+        self._display_parts(parts)
+
+    def filter_parts(self, text):
+        self._display_parts(self.all_parts, text)
+
+    def _display_parts(self, parts, filter_text=""):
+        self.table_model.removeRows(0, self.table_model.rowCount())
+        filter_text = (filter_text or "").strip().lower()
+
+        current_category = None
         for part in parts:
+            searchable_text = f"{part['name']} {part['sku'] or ''}".lower()
+            if filter_text and filter_text not in searchable_text:
+                continue
+
+            category_name = part.get('category_name') or "Без категории"
+            if category_name != current_category:
+                header_item = QStandardItem(category_name)
+                header_font = header_item.font()
+                header_font.setBold(True)
+                header_item.setFont(header_font)
+                header_item.setFlags(Qt.ItemIsEnabled)
+
+                placeholders = [QStandardItem(""), QStandardItem("")]
+                for item in placeholders:
+                    item.setFlags(Qt.ItemIsEnabled)
+
+                self.table_model.appendRow([header_item, *placeholders])
+                current_category = category_name
+
             row = [
                 QStandardItem(part['name']),
-                QStandardItem(part['sku']),
+                QStandardItem(part['sku'] or ""),
                 QStandardItem(str(part['qty']))
             ]
             row[0].setData(part['id'], Qt.UserRole)
             self.table_model.appendRow(row)
+
         self.table_view.resizeColumnsToContents()
 
-    def filter_parts(self, text):
-        self.proxy_model.setFilterFixedString(text)
-        
     def add_new_part(self):
         dialog = PartDialog(self.db, self.event_bus, parent=self)
         dialog.exec()
@@ -100,9 +122,8 @@ class AttachPartDialog(QDialog):
         selected_indexes = self.table_view.selectionModel().selectedRows()
         if not selected_indexes:
             return None
-        
-        source_index = self.proxy_model.mapToSource(selected_indexes[0])
-        item = self.table_model.itemFromIndex(source_index)
+
+        item = self.table_model.itemFromIndex(selected_indexes[0])
         return item.data(Qt.UserRole)
 
     def accept(self):

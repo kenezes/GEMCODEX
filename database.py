@@ -649,9 +649,20 @@ class Database:
         except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
     def get_parts_for_equipment(self, equipment_id):
         query = """
-            SELECT ep.id as equipment_part_id, p.id as part_id, p.name as part_name, p.sku as part_sku, ep.installed_qty,
-                   (SELECT MAX(r.date) FROM replacements r WHERE r.part_id = p.id AND r.equipment_id = ep.equipment_id) as last_replacement_date
-            FROM equipment_parts ep JOIN parts p ON ep.part_id = p.id WHERE ep.equipment_id = ? ORDER BY p.name
+            SELECT ep.id as equipment_part_id,
+                   p.id as part_id,
+                   p.name as part_name,
+                   p.sku as part_sku,
+                   ep.installed_qty,
+                   pc.name as category_name,
+                   (SELECT MAX(r.date)
+                    FROM replacements r
+                    WHERE r.part_id = p.id AND r.equipment_id = ep.equipment_id) as last_replacement_date
+            FROM equipment_parts ep
+                JOIN parts p ON ep.part_id = p.id
+                LEFT JOIN part_categories pc ON p.category_id = pc.id
+            WHERE ep.equipment_id = ?
+            ORDER BY pc.name IS NULL, pc.name, p.name
         """
         return self.fetchall(query, (equipment_id,))
     def attach_part_to_equipment(self, equipment_id, part_id, qty):
@@ -674,8 +685,11 @@ class Database:
         except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
     def get_unattached_parts(self, equipment_id):
         query = """
-            SELECT p.id, p.name, p.sku, p.qty FROM parts p
-            WHERE p.id NOT IN (SELECT part_id FROM equipment_parts WHERE equipment_id = ?) ORDER BY p.name
+            SELECT p.id, p.name, p.sku, p.qty, pc.name as category_name
+            FROM parts p
+                LEFT JOIN part_categories pc ON p.category_id = pc.id
+            WHERE p.id NOT IN (SELECT part_id FROM equipment_parts WHERE equipment_id = ?)
+            ORDER BY pc.name IS NULL, pc.name, p.name
         """
         return self.fetchall(query, (equipment_id,))
     def perform_replacement(self, date_str, equipment_id, part_id, qty, reason):
