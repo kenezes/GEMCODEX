@@ -383,35 +383,39 @@ class Database:
             return False, "Запчасть с таким Наименованием и Артикулом уже существует."
 
     def delete_part(self, part_id):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
         part = self.get_part_by_id(part_id)
         try:
             if self.fetchone("SELECT 1 FROM equipment_parts WHERE part_id = ?", (part_id,)): return False, "Удаление невозможно: запчасть привязана к оборудованию."
             if self.fetchone("SELECT 1 FROM order_items WHERE part_id = ?", (part_id,)): return False, "Удаление невозможно: запчасть используется в заказах."
             if self.fetchone("SELECT 1 FROM replacements WHERE part_id = ?", (part_id,)): return False, "Удаление невозможно: запчасть используется в истории замен."
 
-            if self.fetchone("SELECT 1 FROM knife_tracking WHERE part_id = ?", (part_id,)):
-                has_status_log = self.fetchone(
-                    "SELECT 1 FROM knife_status_log WHERE part_id = ? LIMIT 1",
-                    (part_id,)
-                )
-                has_sharpen_log = self.fetchone(
-                    "SELECT 1 FROM knife_sharpen_log WHERE part_id = ? LIMIT 1",
-                    (part_id,)
-                )
-                if has_status_log or has_sharpen_log:
-                    return False, "Удаление невозможно: нож отслеживается. Сначала удалите историю заточек и статусов."
-                # Нет истории — безопасно удалить записи отслеживания
-                self.execute("DELETE FROM knife_tracking WHERE part_id = ?", (part_id,))
+            deleted_status_rows = deleted_sharpen_rows = deleted_tracking_rows = 0
 
-            self.execute("DELETE FROM parts WHERE id = ?", (part_id,))
-            if self.conn: self.conn.commit()
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute("DELETE FROM knife_status_log WHERE part_id = ?", (part_id,))
+                deleted_status_rows = cursor.rowcount
+                cursor.execute("DELETE FROM knife_sharpen_log WHERE part_id = ?", (part_id,))
+                deleted_sharpen_rows = cursor.rowcount
+                cursor.execute("DELETE FROM knife_tracking WHERE part_id = ?", (part_id,))
+                deleted_tracking_rows = cursor.rowcount
+                cursor.execute("DELETE FROM parts WHERE id = ?", (part_id,))
+
+            if deleted_status_rows or deleted_sharpen_rows or deleted_tracking_rows:
+                self._log_action(
+                    f"Удалены записи отслеживания ножа при удалении запчасти #{part_id}."
+                )
+
             if part:
                 self._log_action(f"Удалена запчасть #{part_id}: {part['name']} (артикул: {part['sku']})")
             else:
                 self._log_action(f"Удалена запчасть #{part_id}")
             return True, "Запчасть удалена."
         except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
-        
+
     def get_part_categories(self): return self.fetchall("SELECT id, name FROM part_categories ORDER BY name")
     def add_part_category(self, name):
         try:
