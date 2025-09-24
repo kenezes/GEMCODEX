@@ -14,9 +14,14 @@ from ui.equipment_tab import EquipmentTab
 from ui.replacement_history_tab import ReplacementHistoryTab
 from ui.tasks_tab import TasksTab
 from ui.knives_tab import KnivesTab
+from ui.log_tab import LogTab
 
 def setup_logging_and_paths():
-    """Настраивает логирование и создает необходимые каталоги."""
+    """Настраивает логирование и создает необходимые каталоги.
+
+    Returns:
+        Path: Путь к основному файлу журнала приложения.
+    """
     log_dir = Path("./logs")
     log_dir.mkdir(exist_ok=True)
     log_file = log_dir / "app.log"
@@ -32,12 +37,14 @@ def setup_logging_and_paths():
     )
     Path("./data").mkdir(exist_ok=True)
     Path("./backup").mkdir(exist_ok=True)
+    return log_file
 
 class MainWindow(QMainWindow):
-    def __init__(self, db, event_bus):
+    def __init__(self, db, event_bus, log_file: Path):
         super().__init__()
         self.db = db
         self.event_bus = event_bus
+        self.log_file = Path(log_file)
         self.setWindowTitle("Система управления запчастями")
         self.setGeometry(100, 100, 1200, 800)
         self.tabs = QTabWidget()
@@ -69,6 +76,9 @@ class MainWindow(QMainWindow):
         self.knives_tab = KnivesTab(self.db, self.event_bus, self)
         self.tabs.addTab(self.knives_tab, "Ножи")
 
+        self.log_tab = LogTab(self.log_file, self)
+        self.tabs.addTab(self.log_tab, "Логи")
+
     def closeEvent(self, event):
         logging.info("Application closing...")
         self.db.disconnect()
@@ -77,7 +87,7 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
 
-    setup_logging_and_paths()
+    log_file = setup_logging_and_paths()
     logging.info("Application starting...")
 
     db_path = Path('./data/app.db')
@@ -93,7 +103,7 @@ def main():
     
     event_bus = EventBus()
 
-    window = MainWindow(db, event_bus)
+    window = MainWindow(db, event_bus, log_file)
     window.show()
 
     sys.exit(app.exec())
