@@ -163,6 +163,7 @@ class EquipmentTab(QWidget):
 
         current_category = None
         row_index = 0
+        part_row_number = 1
         for part in parts:
             # Добавляем ID оборудования в словарь с данными о запчасти
             part['equipment_id'] = equipment_id
@@ -178,6 +179,9 @@ class EquipmentTab(QWidget):
                 header_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 self.parts_table.setItem(row_index, 0, header_item)
                 self.parts_table.setSpan(row_index, 0, 1, self.parts_table.columnCount())
+                header_row_item = QTableWidgetItem("")
+                header_row_item.setFlags(Qt.ItemIsEnabled)
+                self.parts_table.setVerticalHeaderItem(row_index, header_row_item)
                 current_category = category_name
                 row_index += 1
 
@@ -188,6 +192,12 @@ class EquipmentTab(QWidget):
 
             last_replacement_str = part.get('last_replacement_date', '')
             self.parts_table.setItem(row_index, 3, QTableWidgetItem(last_replacement_str))
+
+            row_number_item = QTableWidgetItem(str(part_row_number))
+            row_number_item.setTextAlignment(Qt.AlignCenter)
+            row_number_item.setFlags(Qt.ItemIsEnabled)
+            self.parts_table.setVerticalHeaderItem(row_index, row_number_item)
+            part_row_number += 1
 
             # Кнопки действий
             actions_widget = QWidget()
