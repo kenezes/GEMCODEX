@@ -379,7 +379,18 @@ class Database:
             if self.fetchone("SELECT 1 FROM replacements WHERE part_id = ?", (part_id,)): return False, "Удаление невозможно: запчасть используется в истории замен."
             
             if self.fetchone("SELECT 1 FROM knife_tracking WHERE part_id = ?", (part_id,)):
-                return False, "Удаление невозможно: нож отслеживается. Сначала удалите историю заточек и статусов."
+                has_status_log = self.fetchone(
+                    "SELECT 1 FROM knife_status_log WHERE part_id = ? LIMIT 1",
+                    (part_id,)
+                )
+                has_sharpen_log = self.fetchone(
+                    "SELECT 1 FROM knife_sharpen_log WHERE part_id = ? LIMIT 1",
+                    (part_id,)
+                )
+                if has_status_log or has_sharpen_log:
+                    return False, "Удаление невозможно: нож отслеживается. Сначала удалите историю заточек и статусов."
+                # Нет истории — безопасно удалить записи отслеживания
+                self.execute("DELETE FROM knife_tracking WHERE part_id = ?", (part_id,))
             
             self.execute("DELETE FROM parts WHERE id = ?", (part_id,))
             if self.conn: self.conn.commit()
