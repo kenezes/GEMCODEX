@@ -1,5 +1,4 @@
 import logging
-from functools import partial
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QMessageBox, QSplitter, QTreeWidget, QTreeWidgetItem,
                              QTableWidget, QTableWidgetItem, QHeaderView, QToolButton,
@@ -10,6 +9,7 @@ from .equipment_category_manager_dialog import EquipmentCategoryManagerDialog
 from .equipment_dialog import EquipmentDialog
 from .attach_part_dialog import AttachPartDialog
 from .replacement_dialog import ReplacementDialog
+from .task_dialog import TaskDialog
 from .utils import open_part_folder as open_part_folder_fs, open_equipment_folder as open_equipment_folder_fs
 
 class EquipmentTab(QWidget):
@@ -100,13 +100,12 @@ class EquipmentTab(QWidget):
         parts_buttons_layout.addStretch()
         
         self.parts_table = QTableWidget()
-        self.parts_table.setColumnCount(6)
+        self.parts_table.setColumnCount(5)
         self.parts_table.setHorizontalHeaderLabels([
             "Наименование",
             "Артикул",
             "Установлено, шт.",
             "Последняя замена",
-            "Требует замены",
             "Действия",
         ])
         self.parts_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -390,12 +389,11 @@ class EquipmentTab(QWidget):
             last_replacement_str = part.get('last_replacement_date', '')
             self.parts_table.setItem(row_index, 3, QTableWidgetItem(last_replacement_str))
 
-            requires_checkbox = QCheckBox("Да")
-            requires_checkbox.setChecked(bool(part.get('requires_replacement')))
-            requires_checkbox.stateChanged.connect(
-                partial(self.on_part_requires_replacement_changed, part, requires_checkbox)
+            requires_button = QPushButton()
+            self._update_requires_replacement_button(requires_button, part)
+            requires_button.clicked.connect(
+                lambda _, p=part, b=requires_button: self.on_requires_replacement_button_clicked(p, b)
             )
-            self.parts_table.setCellWidget(row_index, 4, requires_checkbox)
 
             row_number_item = QTableWidgetItem(str(part_row_number))
             row_number_item.setTextAlignment(Qt.AlignCenter)
@@ -421,8 +419,9 @@ class EquipmentTab(QWidget):
             actions_layout.addWidget(detach_button)
             actions_layout.addWidget(folder_button)
             actions_layout.addStretch()
+            actions_layout.addWidget(requires_button)
 
-            self.parts_table.setCellWidget(row_index, 5, actions_widget)
+            self.parts_table.setCellWidget(row_index, 4, actions_widget)
             row_index += 1
 
     def manage_categories(self):
@@ -515,22 +514,85 @@ class EquipmentTab(QWidget):
             if success:
                 self.event_bus.emit("equipment_parts_changed", self.current_equipment_id)
 
-    def on_part_requires_replacement_changed(self, part_data, checkbox, state):
-        requires = state == Qt.Checked
+    def on_requires_replacement_button_clicked(self, part_data, button):
+        new_state = not bool(part_data.get('requires_replacement'))
+        self._set_part_requires_replacement(part_data, button, new_state)
+
+    def _set_part_requires_replacement(self, part_data, button, requires):
         success, equipment_id, message = self.db.set_equipment_part_requires_replacement(
             part_data['equipment_part_id'], requires
         )
         if not success:
-            checkbox.blockSignals(True)
-            checkbox.setChecked(not requires)
-            checkbox.blockSignals(False)
             QMessageBox.critical(self, "Ошибка", message)
+            self._update_requires_replacement_button(button, part_data)
             return
 
         part_data['requires_replacement'] = requires
+        self._update_requires_replacement_button(button, part_data)
+
         if equipment_id:
             self.event_bus.emit("equipment_parts_changed", equipment_id)
         self.event_bus.emit("parts.changed")
+
+        if requires:
+            self._prompt_create_replacement_task(part_data)
+
+    def _update_requires_replacement_button(self, button, part_data):
+        requires = bool(part_data.get('requires_replacement'))
+        if requires:
+            button.setText("Требует замены")
+            button.setStyleSheet(
+                "QPushButton { background-color: #dc3545; color: white; }"
+                "QPushButton:hover { background-color: #c82333; }"
+            )
+            button.setToolTip("Запчасть помечена как требующая замены")
+        else:
+            button.setText("Не требует замены")
+            button.setStyleSheet(
+                "QPushButton { background-color: #28a745; color: white; }"
+                "QPushButton:hover { background-color: #218838; }"
+            )
+            button.setToolTip("Запчасть не помечена как требующая замены")
+
+    def _prompt_create_replacement_task(self, part_data):
+        part_name = part_data.get('part_name') or ""
+        part_sku = part_data.get('part_sku') or "б/а"
+        equipment_id = part_data.get('equipment_id')
+        equipment = (
+            self.db.fetchone("SELECT name, sku FROM equipment WHERE id = ?", (equipment_id,))
+            if equipment_id
+            else None
+        )
+
+        equipment_name = equipment['name'] if equipment else ""
+        equipment_sku = equipment['sku'] if equipment else None
+        equipment_sku = equipment_sku or "б/а"
+
+        part_label = f"{part_name} ({part_sku})"
+        equipment_label = f"{equipment_name} ({equipment_sku})"
+
+        default_title = f"Замена {part_label} на {equipment_label}"
+
+        reply = QMessageBox.question(
+            self,
+            "Создать задачу",
+            f"Создать задачу «{default_title}»?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        dialog = TaskDialog(self.db, self.event_bus, parent=self)
+        dialog.title_edit.setText(default_title)
+
+        if equipment_id is not None:
+            index = dialog.equipment_combo.findData(equipment_id)
+            if index != -1:
+                dialog.equipment_combo.setCurrentIndex(index)
+
+        dialog.exec()
 
     def replace_part(self, part_data):
         """Вызывает диалог замены запчасти."""
