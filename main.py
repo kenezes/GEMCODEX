@@ -3,10 +3,16 @@ import logging
 from datetime import datetime, timedelta
 from logging import handlers
 from pathlib import Path
-from PySide6.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget,
-                               QMessageBox, QToolBar)
+from PySide6.QtWidgets import (
+    QApplication,
+    QMainWindow,
+    QTabWidget,
+    QWidget,
+    QMessageBox,
+    QToolBar,
+    QStyle,
+)
 from PySide6.QtCore import QTimer
-from PySide6.QtGui import QStyle
 
 from database import Database
 from event_bus import EventBus
