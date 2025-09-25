@@ -2,9 +2,8 @@ import logging
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QMessageBox, QSplitter, QTreeWidget, QTreeWidgetItem,
                              QTableWidget, QTableWidgetItem, QHeaderView, QToolButton,
-                             QLabel, QPlainTextEdit)
+                             QLabel, QPlainTextEdit, QStyle)
 from PySide6.QtCore import Qt, QSize
-from PySide6.QtGui import QStyle
 
 from .equipment_category_manager_dialog import EquipmentCategoryManagerDialog
 from .equipment_dialog import EquipmentDialog
@@ -95,7 +94,13 @@ class EquipmentTab(QWidget):
         
         self.parts_table = QTableWidget()
         self.parts_table.setColumnCount(5)
-        self.parts_table.setHorizontalHeaderLabels(["Наименование", "Артикул", "Установлено, шт.", "Последняя замена", "Действия"])
+        self.parts_table.setHorizontalHeaderLabels([
+            "Наименование",
+            "Артикул",
+            "Установлено, шт.",
+            "Последняя замена",
+            "Действия",
+        ])
         self.parts_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.parts_table.setEditTriggers(QTableWidget.NoEditTriggers)
         
@@ -424,10 +429,12 @@ class EquipmentTab(QWidget):
     def on_equipment_parts_changed(self, equipment_id):
         logging.info(f"Event 'equipment_parts_changed' received for equipment_id: {equipment_id}")
         if self.current_equipment_id == equipment_id:
-             logging.info(f"Currently selected equipment matches ({self.current_equipment_id}). Refreshing parts list.")
-             self.load_parts_for_equipment(self.current_equipment_id)
+            logging.info(
+                f"Currently selected equipment matches ({self.current_equipment_id}). Refreshing parts list."
+            )
+            self.load_parts_for_equipment(self.current_equipment_id)
 
     def on_parts_changed(self):
-         if self.current_equipment_id:
-             self.load_parts_for_equipment(self.current_equipment_id)
+        if self.current_equipment_id:
+            self.load_parts_for_equipment(self.current_equipment_id)
 
