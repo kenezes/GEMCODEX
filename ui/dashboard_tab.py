@@ -23,7 +23,7 @@ class DashboardTab(QWidget):
         main_layout = QVBoxLayout(self)
 
         # Блок "Запчасти к заказу"
-        parts_group = QGroupBox("Запчасти к заказу (Остаток < Минимума)")
+        parts_group = QGroupBox("Запчасти к заказу (Остаток < минимума или требуется замена)")
         parts_layout = QVBoxLayout()
         self.parts_table = self._create_parts_table()
         self.order_parts_button = QPushButton("Заказать выбранные")
@@ -102,19 +102,33 @@ class DashboardTab(QWidget):
         parts = self.db.get_parts_to_order()
         for row, part in enumerate(parts):
             self.parts_table.insertRow(row)
-            
+
             name_item = QTableWidgetItem(part['name'])
             name_item.setData(Qt.UserRole, part['id'])
             self.parts_table.setItem(row, 0, name_item)
-            
+
             self.parts_table.setItem(row, 1, QTableWidgetItem(part['sku']))
             self.parts_table.setItem(row, 2, QTableWidgetItem(str(part['qty'])))
             self.parts_table.setItem(row, 3, QTableWidgetItem(str(part['min_qty'])))
             self.parts_table.setItem(row, 4, QTableWidgetItem(f"{part['price']:.2f}"))
-            
-            to_order_qty = part['min_qty'] - part['qty']
+
+            requires_flag = bool(part.get('requires_replacement_flag'))
+            base_to_order_qty = max(part['min_qty'] - part['qty'], 0)
+            to_order_qty = max(base_to_order_qty, 1) if requires_flag else base_to_order_qty
             to_order_item = QTableWidgetItem(str(to_order_qty))
-            if to_order_qty <= 0:
+            if requires_flag:
+                note = (
+                    "Запчасть помечена как требующая замены, но на складе отсутствует. "
+                    "Рекомендуется добавить в заказ."
+                )
+                name_item.setToolTip(note)
+                to_order_item.setToolTip(note)
+                to_order_item.setBackground(QColor("#FFF3CD"))
+                for col in range(self.parts_table.columnCount()):
+                    item = self.parts_table.item(row, col)
+                    if item:
+                        item.setBackground(QColor("#FFF3CD"))
+            elif to_order_qty <= 0:
                 to_order_item.setBackground(QColor("#ffcccb"))
             self.parts_table.setItem(row, 5, to_order_item)
 
@@ -165,14 +179,41 @@ class DashboardTab(QWidget):
             
         initial_items = []
         for row in selected_rows:
-            part_id = self.parts_table.item(row, 0).data(Qt.UserRole)
+            part_item = self.parts_table.item(row, 0)
+            part_id = part_item.data(Qt.UserRole) if part_item else None
+            if not part_id:
+                continue
+
             part = self.db.get_part_by_id(part_id)
-            to_order_qty = part['min_qty'] - part['qty']
+            table_qty_item = self.parts_table.item(row, 5)
+            try:
+                to_order_qty = int(table_qty_item.text()) if table_qty_item else 0
+            except (TypeError, ValueError):
+                to_order_qty = 0
+
             if to_order_qty <= 0:
-                reply = QMessageBox.warning(self, "Внимание", f"Запчасть '{part['name']}' не требует заказа.\nВсе равно добавить в заказ?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-                if reply == QMessageBox.No: continue
-            
-            initial_items.append({'part_id': part['id'], 'name': part['name'], 'sku': part['sku'], 'qty': to_order_qty if to_order_qty > 0 else 1, 'price': part['price']})
+                calculated_default = max(part['min_qty'] - part['qty'], 0)
+                if calculated_default <= 0:
+                    reply = QMessageBox.warning(
+                        self,
+                        "Внимание",
+                        f"Запчасть '{part['name']}' не требует заказа.\nВсе равно добавить в заказ?",
+                        QMessageBox.Yes | QMessageBox.No,
+                        QMessageBox.No,
+                    )
+                    if reply == QMessageBox.No:
+                        continue
+                    to_order_qty = 1
+                else:
+                    to_order_qty = calculated_default
+
+            initial_items.append({
+                'part_id': part['id'],
+                'name': part['name'],
+                'sku': part['sku'],
+                'qty': to_order_qty if to_order_qty > 0 else 1,
+                'price': part['price'],
+            })
 
         if not initial_items: return
         order_dialog = OrderDialog(self.db, self.event_bus, parent=self.main_window, initial_items=initial_items)
