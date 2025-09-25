@@ -45,7 +45,7 @@ class TasksTab(QWidget):
 
         # Таблица
         self.table = QTableWidget()
-        self.table.setColumnCount(7)
+        self.table.setColumnCount(8)
         self.table.setHorizontalHeaderLabels([
             "Задача",
             "Комментарий",
@@ -54,6 +54,7 @@ class TasksTab(QWidget):
             "Создана",
             "Срок",
             "Статус",
+            "Действия",
         ])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
@@ -65,6 +66,7 @@ class TasksTab(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
+        header.setSectionResizeMode(7, QHeaderView.ResizeToContents)
 
         layout.addWidget(self.table)
 
@@ -84,39 +86,63 @@ class TasksTab(QWidget):
 
         for row, task in enumerate(tasks):
             self.table.insertRow(row)
-            
-            # Сохраняем ID в первом столбце
-            id_item = QTableWidgetItem()
-            id_item.setData(Qt.UserRole, task['id'])
-            self.table.setItem(row, 0, id_item)
-            
-            # Заполняем видимые данные
-            self.table.setItem(row, 0, QTableWidgetItem(task['title']))
-            self.table.setItem(row, 1, QTableWidgetItem(task['description']))
-            self.table.setItem(row, 2, QTableWidgetItem(task['equipment_name']))
-            self.table.setItem(row, 3, QTableWidgetItem(task['assignee_name']))
+
+            task_id = task['id']
+            title_text = task['title']
+            if task.get('is_replacement'):
+                title_text = f"[Замена] {title_text}"
+
+            title_item = QTableWidgetItem(title_text)
+            description_item = QTableWidgetItem(task.get('description') or "")
+            equipment_item = QTableWidgetItem(task.get('equipment_name') or "")
+            assignee_item = QTableWidgetItem(task.get('assignee_name') or "")
 
             created_at = task.get('created_at')
             created_date_str = db_string_to_ui_string(created_at.split(" ")[0]) if created_at else ""
-            self.table.setItem(row, 4, QTableWidgetItem(created_date_str))
+            created_item = QTableWidgetItem(created_date_str)
 
             due_date_str = db_string_to_ui_string(task['due_date']) if task['due_date'] else ""
-            self.table.setItem(row, 5, QTableWidgetItem(due_date_str))
-            self.table.setItem(row, 6, QTableWidgetItem(task['status']))
+            due_item = QTableWidgetItem(due_date_str)
+            status_item = QTableWidgetItem(task['status'])
 
-            # Устанавливаем цвет
+            items = [
+                title_item,
+                description_item,
+                equipment_item,
+                assignee_item,
+                created_item,
+                due_item,
+                status_item,
+            ]
+
+            for col, item in enumerate(items):
+                item.setData(Qt.UserRole, task_id)
+                self.table.setItem(row, col, item)
+
+            action_placeholder = QTableWidgetItem("")
+            action_placeholder.setData(Qt.UserRole, task_id)
+            action_placeholder.setFlags(Qt.ItemIsEnabled)
+            self.table.setItem(row, 7, action_placeholder)
+
             color = self.priority_colors.get(task['priority'])
             if color:
                 for col in range(self.table.columnCount()):
-                    # Важно: клонировать итем, чтобы не перезаписать данные UserRole
-                    item = self.table.item(row, col).clone()
-                    item.setBackground(QBrush(color))
-                    self.table.setItem(row, col, item)
-            
-            # Передаем ID в UserRole для всех ячеек, чтобы работало после сортировки
-            task_id = task['id']
-            for col in range(self.table.columnCount()):
-                self.table.item(row, col).setData(Qt.UserRole, task_id)
+                    item = self.table.item(row, col)
+                    if item:
+                        item = item.clone()
+                        item.setBackground(QBrush(color))
+                        item.setData(Qt.UserRole, task_id)
+                        self.table.setItem(row, col, item)
+
+            action_button = QPushButton("Исполнить задачу")
+            action_button.setStyleSheet(
+                "QPushButton { background-color: #28a745; color: white; }"
+                "QPushButton:hover { background-color: #218838; }"
+            )
+            action_button.setEnabled(task['status'] != 'выполнена')
+            action_button.clicked.connect(lambda _, t_id=task_id: self.complete_task(t_id))
+            self.table.setCellWidget(row, 7, action_button)
+
 
 
         self.table.setSortingEnabled(True)
@@ -187,11 +213,27 @@ class TasksTab(QWidget):
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def change_task_status(self, task_id, new_status):
-        success, message = self.db.update_task_status(task_id, new_status)
+        success, message, events = self.db.update_task_status(task_id, new_status)
         if success:
+            self._handle_task_events(events)
             self.event_bus.emit("tasks.changed")
         else:
             QMessageBox.critical(self, "Ошибка", message)
+
+    def complete_task(self, task_id):
+        if not task_id:
+            return
+        self.change_task_status(task_id, 'выполнена')
+
+    def _handle_task_events(self, events: dict):
+        equipment_ids = set(events.get('equipment_ids', []))
+        for equipment_id in equipment_ids:
+            self.event_bus.emit("equipment_parts_changed", equipment_id)
+
+        if events.get('parts_changed'):
+            self.event_bus.emit("parts.changed")
+        if events.get('replacements_changed'):
+            self.event_bus.emit("replacements.changed")
 
     def delete_selected_tasks(self):
         rows = self._get_selected_rows()
@@ -250,11 +292,16 @@ class TasksTab(QWidget):
         if reply != QMessageBox.Yes:
             return
 
+        affected_equipment_ids = set()
+
         for task_id in task_ids:
-            success, message = self.db.delete_task(task_id)
+            success, message, events = self.db.delete_task(task_id)
             if not success:
                 QMessageBox.critical(self, "Ошибка", message)
                 break
+            affected_equipment_ids.update(events.get('equipment_ids', []))
         else:
+            if affected_equipment_ids:
+                self._handle_task_events({'equipment_ids': affected_equipment_ids})
             self.event_bus.emit("tasks.changed")
 

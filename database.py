@@ -129,6 +129,13 @@ class Database:
             self.conn.commit()
             logging.info("Database migrated to version 7.")
 
+        if user_version < 8:
+            logging.info("Applying migration to version 8...")
+            self._apply_migration_v8()
+            cursor.execute("PRAGMA user_version = 8;")
+            self.conn.commit()
+            logging.info("Database migrated to version 8.")
+
 
     def _apply_migration_v1(self):
         """Схема БД версии 1."""
@@ -333,6 +340,48 @@ class Database:
                 "Migration v7: не удалось гарантировать наличие столбца equipment_parts.requires_replacement."
             )
 
+    def _apply_migration_v8(self):
+        """Миграция для добавления задач на замену и связанных запчастей."""
+        if not self.conn:
+            return
+
+        cursor = self.conn.cursor()
+
+        try:
+            cursor.execute(
+                "ALTER TABLE tasks ADD COLUMN is_replacement INTEGER NOT NULL DEFAULT 0;"
+            )
+        except sqlite3.OperationalError as exc:
+            logging.info(
+                "Migration v8: колонка tasks.is_replacement уже существует: %s",
+                exc,
+            )
+
+        try:
+            cursor.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS task_parts (
+                    id INTEGER PRIMARY KEY,
+                    task_id INTEGER NOT NULL,
+                    equipment_part_id INTEGER NOT NULL,
+                    part_id INTEGER NOT NULL,
+                    qty INTEGER NOT NULL DEFAULT 1,
+                    FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+                    FOREIGN KEY (equipment_part_id) REFERENCES equipment_parts(id) ON DELETE CASCADE,
+                    FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT
+                );
+                CREATE INDEX IF NOT EXISTS task_parts_task_id_idx ON task_parts(task_id);
+                CREATE INDEX IF NOT EXISTS task_parts_equipment_part_id_idx ON task_parts(equipment_part_id);
+                """
+            )
+        except sqlite3.Error as exc:
+            logging.error(
+                "Migration v8: ошибка при создании таблицы task_parts: %s",
+                exc,
+                exc_info=True,
+            )
+
+
 
     def backup_database(self) -> tuple[bool, str]:
         if not self.conn: return False, "Нет подключения к базе данных."
@@ -393,6 +442,7 @@ class Database:
         """Возвращает незавершенные задачи, отсортированные по приоритету и сроку."""
         query = """
             SELECT t.id, t.title, t.description, t.priority, t.due_date, t.status,
+                   t.is_replacement,
                    e.name as equipment_name, c.name as assignee_name
             FROM tasks t
             LEFT JOIN colleagues c ON t.assignee_id = c.id
@@ -888,6 +938,119 @@ class Database:
             )
             return False, link['equipment_id'], f"Ошибка базы данных: {e}"
 
+    def _refresh_equipment_parts_flags(self, cursor, equipment_part_ids: set[int]):
+        if not equipment_part_ids:
+            return
+
+        placeholders = ",".join("?" for _ in equipment_part_ids)
+        query = f"""
+            SELECT
+                ep.id AS equipment_part_id,
+                EXISTS (
+                    SELECT 1
+                    FROM task_parts tp
+                    JOIN tasks t ON tp.task_id = t.id
+                    WHERE tp.equipment_part_id = ep.id
+                      AND t.status NOT IN ('выполнена', 'отменена')
+                ) AS has_active_task
+            FROM equipment_parts ep
+            WHERE ep.id IN ({placeholders})
+        """
+
+        cursor.execute(query, tuple(equipment_part_ids))
+        rows = cursor.fetchall()
+        for row in rows:
+            requires = 1 if row[1] else 0
+            cursor.execute(
+                "UPDATE equipment_parts SET requires_replacement = ? WHERE id = ?",
+                (requires, row[0]),
+            )
+
+    def _get_equipment_ids_for_part_links(self, cursor, equipment_part_ids: set[int]) -> set[int]:
+        if not equipment_part_ids:
+            return set()
+
+        placeholders = ",".join("?" for _ in equipment_part_ids)
+        cursor.execute(
+            f"SELECT DISTINCT equipment_id FROM equipment_parts WHERE id IN ({placeholders})",
+            tuple(equipment_part_ids),
+        )
+        return {row[0] for row in cursor.fetchall() if row[0] is not None}
+
+    def _fetch_task_equipment_part_ids(self, cursor, task_id: int) -> set[int]:
+        cursor.execute("SELECT equipment_part_id FROM task_parts WHERE task_id = ?", (task_id,))
+        return {row[0] for row in cursor.fetchall() if row[0] is not None}
+
+    def _replace_task_parts(self, cursor, task_id: int, replacement_parts: list[dict], expected_equipment_id: Optional[int]) -> set[int]:
+        cursor.execute("DELETE FROM task_parts WHERE task_id = ?", (task_id,))
+        inserted_equipment_part_ids: set[int] = set()
+
+        for part in replacement_parts:
+            equipment_part_id = part.get('equipment_part_id')
+            part_id = part.get('part_id')
+            qty = int(part.get('qty', 0) or 0)
+
+            if not equipment_part_id:
+                raise ValueError("Для задачи на замену необходимо выбрать запчасти из оборудования.")
+            if not part_id:
+                raise ValueError("Не удалось определить запчасть для задачи на замену.")
+            if qty <= 0:
+                raise ValueError("Количество списываемых запчастей должно быть положительным.")
+
+            cursor.execute(
+                "SELECT part_id, equipment_id FROM equipment_parts WHERE id = ?",
+                (equipment_part_id,),
+            )
+            link_row = cursor.fetchone()
+            if not link_row:
+                raise ValueError("Выбранная запчасть больше не привязана к оборудованию.")
+
+            linked_part_id, equipment_id = link_row
+            if linked_part_id != part_id:
+                raise ValueError("Запчасть и связь с оборудованием не совпадают.")
+            if expected_equipment_id and equipment_id != expected_equipment_id:
+                raise ValueError("Все запчасти должны относиться к выбранному оборудованию.")
+
+            cursor.execute(
+                "INSERT INTO task_parts (task_id, equipment_part_id, part_id, qty) VALUES (?, ?, ?, ?)",
+                (task_id, equipment_part_id, part_id, qty),
+            )
+            inserted_equipment_part_ids.add(equipment_part_id)
+
+        return inserted_equipment_part_ids
+
+    def get_task_parts(self, task_id: int) -> list[dict[str, Any]]:
+        query = """
+            SELECT
+                tp.id,
+                tp.task_id,
+                tp.part_id,
+                tp.qty,
+                tp.equipment_part_id,
+                p.name AS part_name,
+                p.sku AS part_sku,
+                ep.equipment_id,
+                ep.installed_qty
+            FROM task_parts tp
+            JOIN parts p ON tp.part_id = p.id
+            LEFT JOIN equipment_parts ep ON tp.equipment_part_id = ep.id
+            WHERE tp.task_id = ?
+        """
+        return self.fetchall(query, (task_id,))
+
+    def _fetch_task_parts_for_processing(self, cursor, task_id: int) -> list[dict[str, Any]]:
+        cursor.execute(
+            """
+                SELECT tp.part_id, tp.qty, tp.equipment_part_id, ep.equipment_id
+                FROM task_parts tp
+                LEFT JOIN equipment_parts ep ON tp.equipment_part_id = ep.id
+                WHERE tp.task_id = ?
+            """,
+            (task_id,),
+        )
+        columns = [col[0] for col in cursor.description]
+        return [dict(zip(columns, row)) for row in cursor.fetchall()]
+
     def get_equipment_ids_with_replacement_flag(self) -> set[int]:
         rows = self.fetchall(
             "SELECT DISTINCT equipment_id FROM equipment_parts WHERE requires_replacement = 1"
@@ -988,7 +1151,7 @@ class Database:
     def get_all_tasks(self):
         query = """
             SELECT t.id, t.title, t.description, t.priority, t.due_date, t.status,
-                   t.created_at,
+                   t.created_at, t.is_replacement,
                    c.name as assignee_name, e.name as equipment_name
             FROM tasks t
             LEFT JOIN colleagues c ON t.assignee_id = c.id
@@ -999,48 +1162,246 @@ class Database:
         """
         return self.fetchall(query)
     def get_task_by_id(self, task_id): return self.fetchone("SELECT * FROM tasks WHERE id = ?", (task_id,))
-    def add_task(self, title, description, priority, due_date, assignee_id, equipment_id, status):
+    def add_task(
+        self,
+        title,
+        description,
+        priority,
+        due_date,
+        assignee_id,
+        equipment_id,
+        status,
+        is_replacement=False,
+        replacement_parts: Optional[list[dict[str, Any]]] = None,
+    ):
+        replacement_parts = replacement_parts or []
+
+        if is_replacement and not equipment_id:
+            return False, "Для задачи на замену необходимо выбрать оборудование.", {}
+        if is_replacement and not replacement_parts:
+            return False, "Добавьте хотя бы одну запчасть для задачи на замену.", {}
+
         try:
             created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-            self.execute(
-                "INSERT INTO tasks (title, description, priority, due_date, assignee_id, equipment_id, status, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (title, description, priority, due_date, assignee_id, equipment_id, status, created_at),
-            )
-            if self.conn: self.conn.commit()
+            events: dict[str, Any] = {}
+
+            if not self.conn:
+                raise sqlite3.Error("Нет подключения к базе данных.")
+
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    """
+                        INSERT INTO tasks (
+                            title, description, priority, due_date, assignee_id, equipment_id, status, created_at, is_replacement
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        title,
+                        description,
+                        priority,
+                        due_date,
+                        assignee_id,
+                        equipment_id,
+                        status,
+                        created_at,
+                        1 if is_replacement else 0,
+                    ),
+                )
+                task_id = cursor.lastrowid
+
+                affected_equipment_part_ids: set[int] = set()
+                if is_replacement:
+                    affected_equipment_part_ids = self._replace_task_parts(
+                        cursor,
+                        task_id,
+                        replacement_parts,
+                        equipment_id,
+                    )
+                    self._refresh_equipment_parts_flags(cursor, affected_equipment_part_ids)
+                    events['equipment_ids'] = self._get_equipment_ids_for_part_links(
+                        cursor, affected_equipment_part_ids
+                    )
+
             self._log_action(
                 f"Создана задача: '{title}' (приоритет: {priority}, срок: {due_date or 'не указан'}, назначена на сотрудника #{assignee_id or 'нет'})"
             )
-            return True, "Задача создана."
-        except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
-    def update_task(self, task_id, title, description, priority, due_date, assignee_id, equipment_id, status):
+            return True, "Задача создана.", events
+        except ValueError as exc:
+            return False, str(exc), {}
+        except sqlite3.Error as e:
+            logging.error("Ошибка при добавлении задачи: %s", e, exc_info=True)
+            return False, f"Ошибка базы данных: {e}", {}
+
+    def update_task(
+        self,
+        task_id,
+        title,
+        description,
+        priority,
+        due_date,
+        assignee_id,
+        equipment_id,
+        status,
+        is_replacement=False,
+        replacement_parts: Optional[list[dict[str, Any]]] = None,
+    ):
+        replacement_parts = replacement_parts or []
+
+        if is_replacement and not equipment_id:
+            return False, "Для задачи на замену необходимо выбрать оборудование.", {}
+        if is_replacement and not replacement_parts:
+            return False, "Добавьте хотя бы одну запчасть для задачи на замену.", {}
+
         try:
-            self.execute("UPDATE tasks SET title=?, description=?, priority=?, due_date=?, assignee_id=?, equipment_id=?, status=? WHERE id=?",
-                         (title, description, priority, due_date, assignee_id, equipment_id, status, task_id))
-            if self.conn: self.conn.commit()
+            if not self.conn:
+                raise sqlite3.Error("Нет подключения к базе данных.")
+
+            with self.conn:
+                cursor = self.conn.cursor()
+                previous_equipment_part_ids = self._fetch_task_equipment_part_ids(cursor, task_id)
+
+                cursor.execute(
+                    """
+                        UPDATE tasks
+                        SET title=?, description=?, priority=?, due_date=?, assignee_id=?, equipment_id=?, status=?, is_replacement=?
+                        WHERE id=?
+                    """,
+                    (
+                        title,
+                        description,
+                        priority,
+                        due_date,
+                        assignee_id,
+                        equipment_id,
+                        status,
+                        1 if is_replacement else 0,
+                        task_id,
+                    ),
+                )
+
+                affected_equipment_part_ids = set(previous_equipment_part_ids)
+
+                if is_replacement:
+                    new_equipment_part_ids = self._replace_task_parts(
+                        cursor,
+                        task_id,
+                        replacement_parts,
+                        equipment_id,
+                    )
+                    affected_equipment_part_ids.update(new_equipment_part_ids)
+                else:
+                    cursor.execute("DELETE FROM task_parts WHERE task_id = ?", (task_id,))
+
+                self._refresh_equipment_parts_flags(cursor, affected_equipment_part_ids)
+                equipment_ids = self._get_equipment_ids_for_part_links(
+                    cursor, affected_equipment_part_ids
+                )
+
             self._log_action(
                 f"Обновлена задача #{task_id}: '{title}' (приоритет: {priority}, срок: {due_date or 'не указан'}, статус: {status})"
             )
-            return True, "Задача обновлена."
-        except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+            return True, "Задача обновлена.", {'equipment_ids': equipment_ids}
+        except ValueError as exc:
+            return False, str(exc), {}
+        except sqlite3.Error as e:
+            logging.error("Ошибка при обновлении задачи #%s: %s", task_id, e, exc_info=True)
+            return False, f"Ошибка базы данных: {e}", {}
+
     def update_task_status(self, task_id, new_status):
+        task = self.get_task_by_id(task_id)
+        if not task:
+            return False, "Задача не найдена.", {}
+
         try:
-            self.execute("UPDATE tasks SET status = ? WHERE id = ?", (new_status, task_id))
-            if self.conn: self.conn.commit()
+            if not self.conn:
+                raise sqlite3.Error("Нет подключения к базе данных.")
+
+            events: dict[str, Any] = {}
+
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute("UPDATE tasks SET status = ? WHERE id = ?", (new_status, task_id))
+
+                affected_equipment_part_ids: set[int] = set()
+                equipment_ids: set[int] = set()
+                parts_changed = False
+
+                if task.get('is_replacement'):
+                    parts_rows = self._fetch_task_parts_for_processing(cursor, task_id)
+                    affected_equipment_part_ids = {
+                        row['equipment_part_id']
+                        for row in parts_rows
+                        if row.get('equipment_part_id')
+                    }
+                    equipment_ids = {
+                        row['equipment_id']
+                        for row in parts_rows
+                        if row.get('equipment_id') is not None
+                    }
+
+                    if new_status == 'выполнена':
+                        for row in parts_rows:
+                            cursor.execute("SELECT qty FROM parts WHERE id = ?", (row['part_id'],))
+                            qty_row = cursor.fetchone()
+                            if not qty_row:
+                                raise ValueError("Запчасть для списания не найдена.")
+                            if qty_row[0] < row['qty']:
+                                raise ValueError("Недостаточно запчастей на складе для списания.")
+
+                        reason = task.get('description') or f"Задача #{task_id}: {task.get('title')}"
+                        date_str = date.today().isoformat()
+
+                        for row in parts_rows:
+                            cursor.execute(
+                                "UPDATE parts SET qty = qty - ? WHERE id = ?",
+                                (row['qty'], row['part_id']),
+                            )
+                            if row.get('equipment_id') is not None:
+                                cursor.execute(
+                                    "INSERT INTO replacements (date, equipment_id, part_id, qty, reason) VALUES (?, ?, ?, ?, ?)",
+                                    (date_str, row['equipment_id'], row['part_id'], row['qty'], reason),
+                                )
+
+                        parts_changed = True
+
+                self._refresh_equipment_parts_flags(cursor, affected_equipment_part_ids)
+
+            if equipment_ids:
+                events['equipment_ids'] = equipment_ids
+            if parts_changed:
+                events['parts_changed'] = True
+                events['replacements_changed'] = True
+
             self._log_action(f"Изменён статус задачи #{task_id} на '{new_status}'")
-            return True, "Статус задачи обновлен."
-        except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+            return True, "Статус задачи обновлен.", events
+        except ValueError as exc:
+            return False, str(exc), {}
+        except sqlite3.Error as e:
+            logging.error("Ошибка при изменении статуса задачи #%s: %s", task_id, e, exc_info=True)
+            return False, f"Ошибка базы данных: {e}", {}
+
     def delete_task(self, task_id):
         try:
-            task = self.fetchone("SELECT title FROM tasks WHERE id = ?", (task_id,))
-            self.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
-            if self.conn: self.conn.commit()
+            if not self.conn:
+                raise sqlite3.Error("Нет подключения к базе данных.")
+
+            with self.conn:
+                cursor = self.conn.cursor()
+                task = cursor.execute("SELECT title FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                equipment_part_ids = self._fetch_task_equipment_part_ids(cursor, task_id)
+                cursor.execute("DELETE FROM tasks WHERE id = ?", (task_id,))
+                self._refresh_equipment_parts_flags(cursor, equipment_part_ids)
+                equipment_ids = self._get_equipment_ids_for_part_links(cursor, equipment_part_ids)
+
             if task:
                 self._log_action(f"Удалена задача #{task_id}: '{task['title']}'")
             else:
                 self._log_action(f"Удалена задача #{task_id}")
-            return True, "Задача удалена."
-        except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+            return True, "Задача удалена.", {'equipment_ids': equipment_ids}
+        except sqlite3.Error as e:
+            logging.error("Ошибка при удалении задачи #%s: %s", task_id, e, exc_info=True)
+            return False, f"Ошибка базы данных: {e}", {}
         
     # --- Knives ---
     def get_all_knives_data(self):
