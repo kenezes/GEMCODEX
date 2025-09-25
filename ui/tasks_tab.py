@@ -35,6 +35,9 @@ class TasksTab(QWidget):
         
         controls_layout.addWidget(self.create_task_button)
         controls_layout.addWidget(self.manage_colleagues_button)
+        self.delete_tasks_button = QPushButton("Удалить выбранные")
+
+        controls_layout.addWidget(self.delete_tasks_button)
         controls_layout.addStretch()
         controls_layout.addWidget(self.hide_completed_checkbox)
         controls_layout.addWidget(self.refresh_button)
@@ -42,9 +45,18 @@ class TasksTab(QWidget):
 
         # Таблица
         self.table = QTableWidget()
-        self.table.setColumnCount(6)
-        self.table.setHorizontalHeaderLabels(["Задача", "Комментарий", "Оборудование", "Исполнитель", "Срок", "Статус"])
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels([
+            "Задача",
+            "Комментарий",
+            "Оборудование",
+            "Исполнитель",
+            "Создана",
+            "Срок",
+            "Статус",
+        ])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.setSortingEnabled(True)
@@ -52,16 +64,16 @@ class TasksTab(QWidget):
 
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.Stretch)
-        
+        header.setStretchLastSection(False)
+
         layout.addWidget(self.table)
-        
+
         # Подключения
         self.create_task_button.clicked.connect(self.create_task)
         self.manage_colleagues_button.clicked.connect(self.manage_colleagues)
         self.refresh_button.clicked.connect(self.refresh_data)
         self.hide_completed_checkbox.toggled.connect(self.filter_tasks)
+        self.delete_tasks_button.clicked.connect(self.delete_selected_tasks)
         self.table.doubleClicked.connect(self.edit_task)
         self.table.customContextMenuRequested.connect(self.show_context_menu)
 
@@ -83,9 +95,14 @@ class TasksTab(QWidget):
             self.table.setItem(row, 1, QTableWidgetItem(task['description']))
             self.table.setItem(row, 2, QTableWidgetItem(task['equipment_name']))
             self.table.setItem(row, 3, QTableWidgetItem(task['assignee_name']))
+
+            created_at = task.get('created_at')
+            created_date_str = db_string_to_ui_string(created_at.split(" ")[0]) if created_at else ""
+            self.table.setItem(row, 4, QTableWidgetItem(created_date_str))
+
             due_date_str = db_string_to_ui_string(task['due_date']) if task['due_date'] else ""
-            self.table.setItem(row, 4, QTableWidgetItem(due_date_str))
-            self.table.setItem(row, 5, QTableWidgetItem(task['status']))
+            self.table.setItem(row, 5, QTableWidgetItem(due_date_str))
+            self.table.setItem(row, 6, QTableWidgetItem(task['status']))
 
             # Устанавливаем цвет
             color = self.priority_colors.get(task['priority'])
@@ -108,7 +125,7 @@ class TasksTab(QWidget):
     def filter_tasks(self):
         hide = self.hide_completed_checkbox.isChecked()
         for row in range(self.table.rowCount()):
-            status_item = self.table.item(row, 5)
+            status_item = self.table.item(row, 6)
             is_completed = status_item and status_item.text() in ['выполнена', 'отменена']
             self.table.setRowHidden(row, hide and is_completed)
             
@@ -129,27 +146,42 @@ class TasksTab(QWidget):
             self.event_bus.emit("tasks.changed") # Обновляем задачи, т.к. могли измениться исполнители
 
     def show_context_menu(self, pos):
-        selected_item = self.table.itemAt(pos)
-        if not selected_item:
+        clicked_item = self.table.itemAt(pos)
+        if not clicked_item:
             return
 
-        row = selected_item.row()
-        task_id = self.table.item(row, 0).data(Qt.UserRole)
-        if not task_id:
-            return
+        row = clicked_item.row()
+        selected_rows = self._get_selected_rows()
+        if row not in selected_rows:
+            self.table.selectRow(row)
+            selected_rows = self._get_selected_rows()
 
         menu = QMenu(self)
-        
-        status_menu = menu.addMenu("Изменить статус")
-        for status in self.statuses:
-            action = QAction(status, self)
-            action.triggered.connect(lambda checked=False, s=status, t_id=task_id: self.change_task_status(t_id, s))
-            status_menu.addAction(action)
 
-        menu.addSeparator()
+        if len(selected_rows) == 1:
+            task_id = self.table.item(row, 0).data(Qt.UserRole)
+            if not task_id:
+                return
 
-        delete_action = QAction("Удалить задачу", self)
-        delete_action.triggered.connect(lambda: self.delete_task(task_id, row))
+            status_menu = menu.addMenu("Изменить статус")
+            for status in self.statuses:
+                action = QAction(status, self)
+                action.triggered.connect(lambda checked=False, s=status, t_id=task_id: self.change_task_status(t_id, s))
+                status_menu.addAction(action)
+
+            menu.addSeparator()
+
+        delete_label = "Удалить задачу" if len(selected_rows) == 1 else f"Удалить {len(selected_rows)} задач"
+        delete_action = QAction(delete_label, self)
+        if len(selected_rows) == 1:
+            title_item = self.table.item(row, 0)
+            task_id = title_item.data(Qt.UserRole) if title_item else None
+            task_title = title_item.text() if title_item else ""
+            delete_action.triggered.connect(
+                lambda checked=False, t_id=task_id, t_title=task_title: self._delete_tasks([t_id], [t_title])
+            )
+        else:
+            delete_action.triggered.connect(self.delete_selected_tasks)
         menu.addAction(delete_action)
 
         menu.exec(self.table.viewport().mapToGlobal(pos))
@@ -161,17 +193,68 @@ class TasksTab(QWidget):
         else:
             QMessageBox.critical(self, "Ошибка", message)
 
-    def delete_task(self, task_id, row):
-        title_item = self.table.item(row, 0)
-        title = title_item.text() if title_item else ""
+    def delete_selected_tasks(self):
+        rows = self._get_selected_rows()
+        if not rows:
+            QMessageBox.information(self, "Удаление задач", "Не выбрано ни одной задачи.")
+            return
 
-        reply = QMessageBox.question(self, "Удаление задачи",
-                                   f"Вы уверены, что хотите удалить задачу '{title}'?",
-                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
+        task_ids = []
+        titles = []
+        for row in rows:
+            item = self.table.item(row, 0)
+            if not item:
+                continue
+            task_id = item.data(Qt.UserRole)
+            if not task_id:
+                continue
+            task_ids.append(task_id)
+            titles.append(item.text())
+
+        if not task_ids:
+            return
+
+        self._delete_tasks(task_ids, titles)
+
+    def _get_selected_rows(self):
+        return sorted({index.row() for index in self.table.selectedIndexes()})
+
+    def _delete_tasks(self, task_ids, titles):
+        if not task_ids:
+            return
+
+        valid_pairs = [(t_id, title) for t_id, title in zip(task_ids, titles) if t_id]
+        if not valid_pairs:
+            return
+
+        task_ids = [pair[0] for pair in valid_pairs]
+        titles = [pair[1] for pair in valid_pairs]
+
+        if len(task_ids) == 1:
+            prompt = f"Вы уверены, что хотите удалить задачу '{titles[0]}'?"
+        else:
+            previews = '\n'.join(f"• {title}" for title in titles[:5])
+            if len(titles) > 5:
+                previews += "\n…"
+            prompt = (
+                f"Удалить выбранные задачи ({len(task_ids)} шт.)?\n\n" + previews
+            )
+
+        reply = QMessageBox.question(
+            self,
+            "Удаление задач",
+            prompt,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        for task_id in task_ids:
             success, message = self.db.delete_task(task_id)
-            if success:
-                self.event_bus.emit("tasks.changed")
-            else:
+            if not success:
                 QMessageBox.critical(self, "Ошибка", message)
+                break
+        else:
+            self.event_bus.emit("tasks.changed")
 

@@ -115,6 +115,13 @@ class Database:
             self.conn.commit()
             logging.info("Database migrated to version 5.")
 
+        if user_version < 6:
+            logging.info("Applying migration to version 6...")
+            self._apply_migration_v6()
+            cursor.execute("PRAGMA user_version = 6;")
+            self.conn.commit()
+            logging.info("Database migrated to version 6.")
+
 
     def _apply_migration_v1(self):
         """Схема БД версии 1."""
@@ -293,6 +300,21 @@ class Database:
         except sqlite3.OperationalError as exc:
             # Столбец уже существует
             logging.warning("Could not add equipment.comment column (maybe already exists): %s", exc)
+
+    def _apply_migration_v6(self):
+        """Миграция для добавления даты создания задач."""
+        if not self.conn:
+            return
+
+        try:
+            self.conn.execute("ALTER TABLE tasks ADD COLUMN created_at TEXT;")
+        except sqlite3.OperationalError as exc:
+            logging.warning("Could not add tasks.created_at column (maybe already exists): %s", exc)
+            return
+
+        self.conn.execute(
+            "UPDATE tasks SET created_at = COALESCE(created_at, strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime'))"
+        )
 
 
     def backup_database(self) -> tuple[bool, str]:
@@ -818,6 +840,7 @@ class Database:
     def get_all_tasks(self):
         query = """
             SELECT t.id, t.title, t.description, t.priority, t.due_date, t.status,
+                   t.created_at,
                    c.name as assignee_name, e.name as equipment_name
             FROM tasks t
             LEFT JOIN colleagues c ON t.assignee_id = c.id
@@ -830,8 +853,12 @@ class Database:
     def get_task_by_id(self, task_id): return self.fetchone("SELECT * FROM tasks WHERE id = ?", (task_id,))
     def add_task(self, title, description, priority, due_date, assignee_id, equipment_id, status):
         try:
-            self.execute("INSERT INTO tasks (title, description, priority, due_date, assignee_id, equipment_id, status) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                         (title, description, priority, due_date, assignee_id, equipment_id, status))
+            created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            self.execute(
+                "INSERT INTO tasks (title, description, priority, due_date, assignee_id, equipment_id, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (title, description, priority, due_date, assignee_id, equipment_id, status, created_at),
+            )
             if self.conn: self.conn.commit()
             self._log_action(
                 f"Создана задача: '{title}' (приоритет: {priority}, срок: {due_date or 'не указан'}, назначена на сотрудника #{assignee_id or 'нет'})"
