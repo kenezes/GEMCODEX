@@ -9,7 +9,6 @@ from PySide6.QtWidgets import (
     QTabWidget,
     QWidget,
     QMessageBox,
-    QToolBar,
     QStyle,
 )
 from PySide6.QtCore import QTimer
@@ -63,7 +62,6 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
         self.init_tabs()
-        self.init_backup_toolbar()
         self.setup_backup_timer()
 
     def init_tabs(self):
@@ -91,18 +89,14 @@ class MainWindow(QMainWindow):
         self.knives_tab = KnivesTab(self.db, self.event_bus, self)
         self.tabs.addTab(self.knives_tab, "Ножи")
 
-        self.log_tab = LogTab(self.log_file, self)
-        self.tabs.addTab(self.log_tab, "Логи")
-
-    def init_backup_toolbar(self):
-        toolbar = QToolBar("Инструменты")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-
         backup_icon = self.style().standardIcon(QStyle.SP_DialogSaveButton)
-        self.backup_action = toolbar.addAction(backup_icon, "Создать бекап")
-        self.backup_action.setToolTip("Создать резервную копию приложения")
-        self.backup_action.triggered.connect(self.perform_manual_backup)
+        self.log_tab = LogTab(
+            self.log_file,
+            self,
+            backup_handler=self.perform_manual_backup,
+            backup_icon=backup_icon,
+        )
+        self.tabs.addTab(self.log_tab, "Логи")
 
     def setup_backup_timer(self):
         self.backup_timer = QTimer(self)
