@@ -1,8 +1,9 @@
 import logging
+from functools import partial
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QMessageBox, QSplitter, QTreeWidget, QTreeWidgetItem,
                              QTableWidget, QTableWidgetItem, QHeaderView, QToolButton,
-                             QLabel, QPlainTextEdit, QStyle)
+                             QLabel, QPlainTextEdit, QStyle, QCheckBox)
 from PySide6.QtCore import Qt, QSize
 
 from .equipment_category_manager_dialog import EquipmentCategoryManagerDialog
@@ -65,6 +66,12 @@ class EquipmentTab(QWidget):
         self.tree.setHeaderHidden(True)
 
         left_layout.addLayout(tree_buttons_layout)
+
+        self.only_requires_equipment_checkbox = QCheckBox("Только оборудование с требующей замену запчастью")
+        self.only_requires_equipment_checkbox.setToolTip(
+            "Отображать только те аппараты, у которых есть помеченные как требующие замены запчасти."
+        )
+        left_layout.addWidget(self.only_requires_equipment_checkbox)
         left_layout.addWidget(self.tree)
 
         comment_controls_layout = QHBoxLayout()
@@ -93,12 +100,13 @@ class EquipmentTab(QWidget):
         parts_buttons_layout.addStretch()
         
         self.parts_table = QTableWidget()
-        self.parts_table.setColumnCount(5)
+        self.parts_table.setColumnCount(6)
         self.parts_table.setHorizontalHeaderLabels([
             "Наименование",
             "Артикул",
             "Установлено, шт.",
             "Последняя замена",
+            "Требует замены",
             "Действия",
         ])
         self.parts_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -108,6 +116,11 @@ class EquipmentTab(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
 
+        self.only_requires_parts_checkbox = QCheckBox("Только требующие замену")
+        self.only_requires_parts_checkbox.setToolTip(
+            "Скрыть элементы, которые не помечены как требующие замены."
+        )
+        parts_buttons_layout.addWidget(self.only_requires_parts_checkbox)
         right_layout.addLayout(parts_buttons_layout)
         right_layout.addWidget(self.parts_table)
 
@@ -127,12 +140,14 @@ class EquipmentTab(QWidget):
         self.open_equipment_folder_button.clicked.connect(self.open_selected_equipment_folder)
         self.comment_edit.textChanged.connect(self.on_comment_text_changed)
         self.save_comment_button.clicked.connect(self.save_equipment_comment)
+        self.only_requires_equipment_checkbox.toggled.connect(self.on_equipment_filter_toggled)
+        self.only_requires_parts_checkbox.toggled.connect(self.on_parts_filter_toggled)
 
     def update_buttons_state(self):
         selected_item = self.tree.currentItem()
         is_item_selected = selected_item is not None
         item_data = selected_item.data(0, Qt.UserRole) if is_item_selected else {}
-        
+
         is_category_selected = is_item_selected and item_data.get('type') == 'category'
         is_equipment_selected = is_item_selected and item_data.get('type') == 'equipment'
 
@@ -141,31 +156,78 @@ class EquipmentTab(QWidget):
         self.add_part_button.setEnabled(is_equipment_selected)
         self.open_equipment_folder_button.setEnabled(is_equipment_selected)
 
+    def on_equipment_filter_toggled(self, checked):
+        self.load_tree_data()
+
+    def on_parts_filter_toggled(self, checked):
+        if self.current_equipment_id:
+            self.load_parts_for_equipment(self.current_equipment_id)
+        else:
+            self.parts_table.setRowCount(0)
+
     def load_tree_data(self, *args, **kwargs):
+        selected_equipment_id = self.current_equipment_id
         self.tree.clear()
         self.update_comment_panel(None)
+
         categories = self.db.get_equipment_categories()
         equipment_list = self.db.get_all_equipment()
+        filter_active = self.only_requires_equipment_checkbox.isChecked()
+        equipment_with_flags = self.db.get_equipment_ids_with_replacement_flag()
 
         equipment_by_parent = {}
         for eq in equipment_list:
             parent_id = eq['parent_id']
-            if parent_id not in equipment_by_parent:
-                equipment_by_parent[parent_id] = []
-            equipment_by_parent[parent_id].append(eq)
+            equipment_by_parent.setdefault(parent_id, []).append(eq)
 
         for cat in categories:
             cat_item = QTreeWidgetItem(self.tree, [cat['name']])
             cat_item.setData(0, Qt.UserRole, {'type': 'category', 'id': cat['id']})
-            
-            top_level_equipment = [eq for eq in equipment_list if eq['category_id'] == cat['id'] and eq['parent_id'] is None]
-            
+
+            top_level_equipment = [
+                eq for eq in equipment_list if eq['category_id'] == cat['id'] and eq['parent_id'] is None
+            ]
+
+            has_children = False
             for eq in top_level_equipment:
-                self._add_equipment_node(cat_item, eq, equipment_by_parent)
+                if self._add_equipment_node(cat_item, eq, equipment_by_parent, equipment_with_flags, filter_active):
+                    has_children = True
+
+            if not has_children:
+                index = self.tree.indexOfTopLevelItem(cat_item)
+                self.tree.takeTopLevelItem(index)
 
         self.tree.expandAll()
 
-    def _add_equipment_node(self, parent_item, equipment_data, equipment_by_parent):
+        if selected_equipment_id:
+            item = self._find_tree_item_by_equipment_id(selected_equipment_id)
+            if item:
+                self.tree.setCurrentItem(item)
+                self.current_equipment_id = selected_equipment_id
+                self.update_comment_panel(item)
+                self.load_parts_for_equipment(selected_equipment_id)
+            else:
+                self.current_equipment_id = None
+                self.parts_table.setRowCount(0)
+        else:
+            self.current_equipment_id = None
+            self.parts_table.setRowCount(0)
+
+        self.update_buttons_state()
+
+    def _add_equipment_node(
+        self,
+        parent_item,
+        equipment_data,
+        equipment_by_parent,
+        equipment_with_flags,
+        filter_active,
+    ):
+        if filter_active and not self._equipment_matches_filter(
+            equipment_data['id'], equipment_by_parent, equipment_with_flags
+        ):
+            return False
+
         display_text = f"{equipment_data['name']} ({equipment_data['sku'] or 'б/а'})"
         eq_item = QTreeWidgetItem(parent_item, [display_text])
         eq_item.setData(0, Qt.UserRole, {
@@ -178,7 +240,41 @@ class EquipmentTab(QWidget):
 
         children = equipment_by_parent.get(equipment_data['id'], [])
         for child in children:
-            self._add_equipment_node(eq_item, child, equipment_by_parent)
+            self._add_equipment_node(eq_item, child, equipment_by_parent, equipment_with_flags, filter_active)
+
+        return True
+
+    def _equipment_matches_filter(self, equipment_id, equipment_by_parent, equipment_with_flags):
+        if equipment_id in equipment_with_flags:
+            return True
+
+        for child in equipment_by_parent.get(equipment_id, []):
+            if self._equipment_matches_filter(child['id'], equipment_by_parent, equipment_with_flags):
+                return True
+
+        return False
+
+    def _find_tree_item_by_equipment_id(self, equipment_id):
+        if equipment_id is None:
+            return None
+
+        def _iter_items(parent):
+            count = parent.childCount()
+            for index in range(count):
+                yield parent.child(index)
+
+        stack = []
+        for index in range(self.tree.topLevelItemCount()):
+            stack.append(self.tree.topLevelItem(index))
+
+        while stack:
+            item = stack.pop()
+            item_data = item.data(0, Qt.UserRole) or {}
+            if item_data.get('type') == 'equipment' and item_data.get('id') == equipment_id:
+                return item
+            stack.extend(_iter_items(item))
+
+        return None
 
     def on_tree_selection_changed(self, current, previous):
         self.update_buttons_state()
@@ -256,13 +352,19 @@ class EquipmentTab(QWidget):
         self.parts_table.setRowCount(0)
         self.parts_table.clearSpans()
 
+        filter_active = self.only_requires_parts_checkbox.isChecked()
+        parts_to_display = []
+        for part in parts:
+            part['equipment_id'] = equipment_id
+            if filter_active and not part.get('requires_replacement'):
+                continue
+            parts_to_display.append(part)
+
         current_category = None
         row_index = 0
         part_row_number = 1
-        for part in parts:
-            # Добавляем ID оборудования в словарь с данными о запчасти
-            part['equipment_id'] = equipment_id
-
+        for part in parts_to_display:
+            
             category_name = part.get('category_name') or "Без категории"
             if category_name != current_category:
                 self.parts_table.insertRow(row_index)
@@ -288,6 +390,13 @@ class EquipmentTab(QWidget):
             last_replacement_str = part.get('last_replacement_date', '')
             self.parts_table.setItem(row_index, 3, QTableWidgetItem(last_replacement_str))
 
+            requires_checkbox = QCheckBox("Да")
+            requires_checkbox.setChecked(bool(part.get('requires_replacement')))
+            requires_checkbox.stateChanged.connect(
+                partial(self.on_part_requires_replacement_changed, part, requires_checkbox)
+            )
+            self.parts_table.setCellWidget(row_index, 4, requires_checkbox)
+
             row_number_item = QTableWidgetItem(str(part_row_number))
             row_number_item.setTextAlignment(Qt.AlignCenter)
             row_number_item.setFlags(Qt.ItemIsEnabled)
@@ -298,7 +407,7 @@ class EquipmentTab(QWidget):
             actions_widget = QWidget()
             actions_layout = QHBoxLayout(actions_widget)
             actions_layout.setContentsMargins(0, 0, 0, 0)
-            
+
             replace_button = QPushButton("Заменить")
             detach_button = QPushButton("Удалить привязку")
 
@@ -313,7 +422,7 @@ class EquipmentTab(QWidget):
             actions_layout.addWidget(folder_button)
             actions_layout.addStretch()
 
-            self.parts_table.setCellWidget(row_index, 4, actions_widget)
+            self.parts_table.setCellWidget(row_index, 5, actions_widget)
             row_index += 1
 
     def manage_categories(self):
@@ -406,6 +515,23 @@ class EquipmentTab(QWidget):
             if success:
                 self.event_bus.emit("equipment_parts_changed", self.current_equipment_id)
 
+    def on_part_requires_replacement_changed(self, part_data, checkbox, state):
+        requires = state == Qt.Checked
+        success, equipment_id, message = self.db.set_equipment_part_requires_replacement(
+            part_data['equipment_part_id'], requires
+        )
+        if not success:
+            checkbox.blockSignals(True)
+            checkbox.setChecked(not requires)
+            checkbox.blockSignals(False)
+            QMessageBox.critical(self, "Ошибка", message)
+            return
+
+        part_data['requires_replacement'] = requires
+        if equipment_id:
+            self.event_bus.emit("equipment_parts_changed", equipment_id)
+        self.event_bus.emit("parts.changed")
+
     def replace_part(self, part_data):
         """Вызывает диалог замены запчасти."""
         dialog = ReplacementDialog(self.db, self.event_bus, part_data, self)
@@ -428,11 +554,11 @@ class EquipmentTab(QWidget):
 
     def on_equipment_parts_changed(self, equipment_id):
         logging.info(f"Event 'equipment_parts_changed' received for equipment_id: {equipment_id}")
+        self.load_tree_data()
         if self.current_equipment_id == equipment_id:
             logging.info(
-                f"Currently selected equipment matches ({self.current_equipment_id}). Refreshing parts list."
+                f"Currently selected equipment matches ({self.current_equipment_id}). Parts list refreshed."
             )
-            self.load_parts_for_equipment(self.current_equipment_id)
 
     def on_parts_changed(self):
         if self.current_equipment_id:

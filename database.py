@@ -122,6 +122,13 @@ class Database:
             self.conn.commit()
             logging.info("Database migrated to version 6.")
 
+        if user_version < 7:
+            logging.info("Applying migration to version 7...")
+            self._apply_migration_v7()
+            cursor.execute("PRAGMA user_version = 7;")
+            self.conn.commit()
+            logging.info("Database migrated to version 7.")
+
 
     def _apply_migration_v1(self):
         """Схема БД версии 1."""
@@ -316,6 +323,21 @@ class Database:
             "UPDATE tasks SET created_at = COALESCE(created_at, strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime'))"
         )
 
+    def _apply_migration_v7(self):
+        """Миграция для добавления признака необходимости замены запчасти."""
+        if not self.conn:
+            return
+
+        try:
+            self.conn.execute(
+                "ALTER TABLE equipment_parts ADD COLUMN requires_replacement INTEGER NOT NULL DEFAULT 0;"
+            )
+        except sqlite3.OperationalError as exc:
+            logging.warning(
+                "Could not add equipment_parts.requires_replacement column (maybe already exists): %s",
+                exc,
+            )
+
 
     def backup_database(self) -> tuple[bool, str]:
         if not self.conn: return False, "Нет подключения к базе данных."
@@ -344,7 +366,32 @@ class Database:
     # --- Dashboard Queries ---
     def get_parts_to_order(self):
         """Возвращает запчасти, у которых текущий остаток меньше минимального."""
-        query = "SELECT id, name, sku, qty, min_qty, price FROM parts WHERE qty < min_qty ORDER BY name"
+        query = """
+            SELECT
+                p.id,
+                p.name,
+                p.sku,
+                p.qty,
+                p.min_qty,
+                p.price,
+                CASE
+                    WHEN p.qty <= 0 AND EXISTS (
+                        SELECT 1 FROM equipment_parts ep
+                        WHERE ep.part_id = p.id AND ep.requires_replacement = 1
+                    ) THEN 1
+                    ELSE 0
+                END AS requires_replacement_flag
+            FROM parts p
+            WHERE p.qty < p.min_qty
+               OR (
+                    p.qty <= 0
+                    AND EXISTS (
+                        SELECT 1 FROM equipment_parts ep
+                        WHERE ep.part_id = p.id AND ep.requires_replacement = 1
+                    )
+                )
+            ORDER BY p.name
+        """
         return self.fetchall(query)
 
     def get_active_tasks(self):
@@ -720,6 +767,7 @@ class Database:
                    p.name as part_name,
                    p.sku as part_sku,
                    ep.installed_qty,
+                   ep.requires_replacement,
                    pc.name as category_name,
                    (SELECT MAX(r.date)
                     FROM replacements r
@@ -749,6 +797,43 @@ class Database:
                 self._log_action(f"Отвязана запчасть от оборудования, связь #{equipment_part_id}")
             return True, "Запчасть отвязана."
         except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+
+    def set_equipment_part_requires_replacement(self, equipment_part_id: int, requires: bool):
+        link = self.fetchone(
+            "SELECT equipment_id, part_id FROM equipment_parts WHERE id = ?",
+            (equipment_part_id,),
+        )
+        if not link:
+            return False, None, "Привязка запчасти не найдена."
+
+        try:
+            requires_value = 1 if requires else 0
+            self.execute(
+                "UPDATE equipment_parts SET requires_replacement = ? WHERE id = ?",
+                (requires_value, equipment_part_id),
+            )
+            if self.conn:
+                self.conn.commit()
+
+            action = "помечена как требующая замены" if requires else "снята отметка о необходимости замены"
+            self._log_action(
+                f"Запчасть #{link['part_id']} на оборудовании #{link['equipment_id']} {action}."
+            )
+            return True, link['equipment_id'], "Статус обновлён."
+        except sqlite3.Error as e:
+            logging.error(
+                "Ошибка обновления признака замены для equipment_part_id=%s: %s",
+                equipment_part_id,
+                e,
+                exc_info=True,
+            )
+            return False, link['equipment_id'], f"Ошибка базы данных: {e}"
+
+    def get_equipment_ids_with_replacement_flag(self) -> set[int]:
+        rows = self.fetchall(
+            "SELECT DISTINCT equipment_id FROM equipment_parts WHERE requires_replacement = 1"
+        )
+        return {row['equipment_id'] for row in rows}
     def get_unattached_parts(self, equipment_id):
         query = """
             SELECT p.id, p.name, p.sku, p.qty, pc.name as category_name
@@ -768,6 +853,10 @@ class Database:
                 if not current_qty_row or current_qty_row[0] < qty: return False, "Недостаточно запчастей на складе."
                 cursor.execute("UPDATE parts SET qty = qty - ? WHERE id = ?", (qty, part_id))
                 cursor.execute("INSERT INTO replacements (date, equipment_id, part_id, qty, reason) VALUES (?, ?, ?, ?, ?)", (date_str, equipment_id, part_id, qty, reason))
+                cursor.execute(
+                    "UPDATE equipment_parts SET requires_replacement = 0 WHERE equipment_id = ? AND part_id = ?",
+                    (equipment_id, part_id),
+                )
             self._log_action(
                 f"Выполнена замена: запчасть #{part_id} на оборудовании #{equipment_id}, количество {qty}, дата {date_str}, причина: {reason or 'не указана'}"
             )
