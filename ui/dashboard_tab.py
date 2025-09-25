@@ -139,7 +139,11 @@ class DashboardTab(QWidget):
         for row, task in enumerate(tasks):
             self.tasks_table.insertRow(row)
             
-            title_item = QTableWidgetItem(task['title'])
+            title_text = task['title']
+            if task.get('is_replacement'):
+                title_text = f"[Замена] {title_text}"
+
+            title_item = QTableWidgetItem(title_text)
             title_item.setData(Qt.UserRole, task['id'])
             self.tasks_table.setItem(row, 0, title_item)
             
@@ -235,11 +239,22 @@ class DashboardTab(QWidget):
         menu.exec(self.tasks_table.viewport().mapToGlobal(position))
 
     def change_task_status(self, task_id, new_status):
-        success, message = self.db.update_task_status(task_id, new_status)
+        success, message, events = self.db.update_task_status(task_id, new_status)
         if success:
+            self._handle_task_events(events)
             self.event_bus.emit("tasks.changed")
         else:
             QMessageBox.critical(self, "Ошибка", message)
+
+    def _handle_task_events(self, events: dict):
+        equipment_ids = set(events.get('equipment_ids', []))
+        for equipment_id in equipment_ids:
+            self.event_bus.emit("equipment_parts_changed", equipment_id)
+
+        if events.get('parts_changed'):
+            self.event_bus.emit("parts.changed")
+        if events.get('replacements_changed'):
+            self.event_bus.emit("replacements.changed")
 
     def show_orders_context_menu(self, position):
         row = self.orders_table.rowAt(position.y())

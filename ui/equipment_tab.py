@@ -515,27 +515,16 @@ class EquipmentTab(QWidget):
                 self.event_bus.emit("equipment_parts_changed", self.current_equipment_id)
 
     def on_requires_replacement_button_clicked(self, part_data, button):
-        new_state = not bool(part_data.get('requires_replacement'))
-        self._set_part_requires_replacement(part_data, button, new_state)
-
-    def _set_part_requires_replacement(self, part_data, button, requires):
-        success, equipment_id, message = self.db.set_equipment_part_requires_replacement(
-            part_data['equipment_part_id'], requires
-        )
-        if not success:
-            QMessageBox.critical(self, "Ошибка", message)
-            self._update_requires_replacement_button(button, part_data)
+        requires_replacement = bool(part_data.get('requires_replacement'))
+        if requires_replacement:
+            QMessageBox.information(
+                self,
+                "Замена уже запланирована",
+                "Для этой запчасти уже существует задача на замену. Завершите или отмените её, чтобы снять отметку.",
+            )
             return
 
-        part_data['requires_replacement'] = requires
-        self._update_requires_replacement_button(button, part_data)
-
-        if equipment_id:
-            self.event_bus.emit("equipment_parts_changed", equipment_id)
-        self.event_bus.emit("parts.changed")
-
-        if requires:
-            self._prompt_create_replacement_task(part_data)
+        self._prompt_create_replacement_task(part_data)
 
     def _update_requires_replacement_button(self, button, part_data):
         requires = bool(part_data.get('requires_replacement'))
@@ -547,12 +536,12 @@ class EquipmentTab(QWidget):
             )
             button.setToolTip("Запчасть помечена как требующая замены")
         else:
-            button.setText("Не требует замены")
+            button.setText("Создать задачу на замену")
             button.setStyleSheet(
                 "QPushButton { background-color: #28a745; color: white; }"
                 "QPushButton:hover { background-color: #218838; }"
             )
-            button.setToolTip("Запчасть не помечена как требующая замены")
+            button.setToolTip("Создайте задачу на замену, чтобы запчасть была помечена")
 
     def _prompt_create_replacement_task(self, part_data):
         part_name = part_data.get('part_name') or ""
@@ -584,7 +573,14 @@ class EquipmentTab(QWidget):
         if reply != QMessageBox.Yes:
             return
 
-        dialog = TaskDialog(self.db, self.event_bus, parent=self)
+        preselected_part = {
+            'equipment_part_id': part_data.get('equipment_part_id'),
+            'part_id': part_data.get('part_id'),
+            'qty': part_data.get('installed_qty') or 1,
+            'equipment_id': equipment_id,
+        }
+
+        dialog = TaskDialog(self.db, self.event_bus, parent=self, preselected_parts=[preselected_part])
         dialog.title_edit.setText(default_title)
 
         if equipment_id is not None:
