@@ -62,7 +62,7 @@ class DashboardTab(QWidget):
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         header = table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setStretchLastSection(False)
         return table
 
     def _create_tasks_table(self):
@@ -73,8 +73,7 @@ class DashboardTab(QWidget):
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         header = table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(6, QHeaderView.Stretch)
+        header.setStretchLastSection(False)
         return table
 
     def _create_orders_table(self):
@@ -85,8 +84,7 @@ class DashboardTab(QWidget):
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         header = table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        header.setStretchLastSection(False)
         return table
 
     def connect_events(self):

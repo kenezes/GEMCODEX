@@ -64,8 +64,7 @@ class CounterpartiesTab(QWidget):
         
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
-        header.setSectionResizeMode(5, QHeaderView.Stretch)
+        header.setStretchLastSection(False)
         
     def refresh_data(self, *args, **kwargs):
         counterparties = self.db.get_all_counterparties()
