@@ -1,9 +1,10 @@
 import logging
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QMessageBox, QSplitter, QTreeWidget, QTreeWidgetItem,
-                             QTableWidget, QTableWidgetItem, QHeaderView)
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction
+                             QTableWidget, QTableWidgetItem, QHeaderView, QToolButton,
+                             QLabel, QPlainTextEdit)
+from PySide6.QtCore import Qt, QSize
+from PySide6.QtGui import QStyle
 
 from .equipment_category_manager_dialog import EquipmentCategoryManagerDialog
 from .equipment_dialog import EquipmentDialog
@@ -17,6 +18,8 @@ class EquipmentTab(QWidget):
         self.db = db
         self.event_bus = event_bus
         self.current_equipment_id = None
+        self._comment_updating = False
+        self._comment_dirty = False
         self.init_ui()
         self.load_tree_data()
         self.update_buttons_state()
@@ -34,11 +37,24 @@ class EquipmentTab(QWidget):
         left_layout = QVBoxLayout(left_panel)
         
         tree_buttons_layout = QHBoxLayout()
-        self.manage_categories_button = QPushButton("Категории...")
-        self.add_equipment_button = QPushButton("+ Оборудование")
-        self.edit_equipment_button = QPushButton("Редактировать")
-        self.delete_equipment_button = QPushButton("Удалить")
-        self.open_equipment_folder_button = QPushButton("Папка")
+        tree_buttons_layout.setSpacing(4)
+
+        icon_size = QSize(24, 24)
+
+        def _create_tool_button(icon: QStyle.StandardPixmap, tooltip: str) -> QToolButton:
+            button = QToolButton()
+            button.setIcon(self.style().standardIcon(icon))
+            button.setToolTip(tooltip)
+            button.setAutoRaise(True)
+            button.setIconSize(icon_size)
+            return button
+
+        self.manage_categories_button = _create_tool_button(QStyle.SP_FileDialogDetailedView, "Управление категориями")
+        self.add_equipment_button = _create_tool_button(QStyle.SP_FileDialogNewFolder, "Добавить оборудование")
+        self.edit_equipment_button = _create_tool_button(QStyle.SP_FileDialogContentsView, "Редактировать выбранный элемент")
+        self.delete_equipment_button = _create_tool_button(QStyle.SP_TrashIcon, "Удалить выбранный элемент")
+        self.open_equipment_folder_button = _create_tool_button(QStyle.SP_DirOpenIcon, "Открыть папку оборудования")
+
         tree_buttons_layout.addWidget(self.manage_categories_button)
         tree_buttons_layout.addWidget(self.add_equipment_button)
         tree_buttons_layout.addWidget(self.edit_equipment_button)
@@ -48,10 +64,26 @@ class EquipmentTab(QWidget):
 
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
-        
+
         left_layout.addLayout(tree_buttons_layout)
         left_layout.addWidget(self.tree)
-        
+
+        comment_controls_layout = QHBoxLayout()
+        self.comment_label = QLabel("Комментарий:")
+        self.save_comment_button = _create_tool_button(QStyle.SP_DialogSaveButton, "Сохранить комментарий")
+        self.save_comment_button.setEnabled(False)
+        comment_controls_layout.addWidget(self.comment_label)
+        comment_controls_layout.addStretch()
+        comment_controls_layout.addWidget(self.save_comment_button)
+
+        self.comment_edit = QPlainTextEdit()
+        self.comment_edit.setPlaceholderText("Введите комментарий к выбранному оборудованию")
+        self.comment_edit.setMaximumHeight(100)
+        self.comment_edit.setEnabled(False)
+
+        left_layout.addLayout(comment_controls_layout)
+        left_layout.addWidget(self.comment_edit)
+
         # Правая панель (таблица запчастей)
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
@@ -76,7 +108,8 @@ class EquipmentTab(QWidget):
 
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
-        splitter.setSizes([300, 700])
+        left_panel.setMinimumWidth(180)
+        splitter.setSizes([240, 760])
         main_layout.addWidget(splitter)
 
         # Подключения
@@ -87,6 +120,8 @@ class EquipmentTab(QWidget):
         self.tree.currentItemChanged.connect(self.on_tree_selection_changed)
         self.add_part_button.clicked.connect(self.attach_part)
         self.open_equipment_folder_button.clicked.connect(self.open_selected_equipment_folder)
+        self.comment_edit.textChanged.connect(self.on_comment_text_changed)
+        self.save_comment_button.clicked.connect(self.save_equipment_comment)
 
     def update_buttons_state(self):
         selected_item = self.tree.currentItem()
@@ -103,6 +138,7 @@ class EquipmentTab(QWidget):
 
     def load_tree_data(self, *args, **kwargs):
         self.tree.clear()
+        self.update_comment_panel(None)
         categories = self.db.get_equipment_categories()
         equipment_list = self.db.get_all_equipment()
 
@@ -132,6 +168,7 @@ class EquipmentTab(QWidget):
             'id': equipment_data['id'],
             'name': equipment_data['name'],
             'sku': equipment_data.get('sku'),
+            'comment': equipment_data.get('comment')
         })
 
         children = equipment_by_parent.get(equipment_data['id'], [])
@@ -140,6 +177,7 @@ class EquipmentTab(QWidget):
 
     def on_tree_selection_changed(self, current, previous):
         self.update_buttons_state()
+        self.update_comment_panel(current)
         if current:
             item_data = current.data(0, Qt.UserRole)
             if item_data and item_data.get('type') == 'equipment':
@@ -151,6 +189,58 @@ class EquipmentTab(QWidget):
         else:
             self.current_equipment_id = None
             self.parts_table.setRowCount(0)
+
+    def update_comment_panel(self, current_item):
+        self._comment_updating = True
+        try:
+            if not current_item:
+                self.comment_edit.clear()
+                self.comment_edit.setEnabled(False)
+                self.comment_label.setText("Комментарий (выберите оборудование):")
+                self.save_comment_button.setEnabled(False)
+                self._comment_dirty = False
+                return
+
+            item_data = current_item.data(0, Qt.UserRole) or {}
+            if item_data.get('type') == 'equipment':
+                comment_text = item_data.get('comment') or ""
+                self.comment_edit.setPlainText(comment_text)
+                self.comment_edit.setEnabled(True)
+                self.comment_label.setText("Комментарий:")
+                self._comment_dirty = False
+                self.save_comment_button.setEnabled(False)
+            else:
+                self.comment_edit.clear()
+                self.comment_edit.setEnabled(False)
+                self.comment_label.setText("Комментарий (выберите оборудование):")
+                self.save_comment_button.setEnabled(False)
+                self._comment_dirty = False
+        finally:
+            self._comment_updating = False
+
+    def on_comment_text_changed(self):
+        if self._comment_updating or not self.comment_edit.isEnabled():
+            return
+        self._comment_dirty = True
+        self.save_comment_button.setEnabled(True)
+
+    def save_equipment_comment(self):
+        if not self.current_equipment_id or not self._comment_dirty:
+            return
+
+        comment_text = self.comment_edit.toPlainText().strip()
+        success, message = self.db.update_equipment_comment(self.current_equipment_id, comment_text)
+        if success:
+            selected_item = self.tree.currentItem()
+            if selected_item:
+                item_data = selected_item.data(0, Qt.UserRole) or {}
+                item_data['comment'] = comment_text
+                selected_item.setData(0, Qt.UserRole, item_data)
+            self._comment_dirty = False
+            self.save_comment_button.setEnabled(False)
+            QMessageBox.information(self, "Комментарий сохранен", message)
+        else:
+            QMessageBox.critical(self, "Ошибка", message)
 
     def load_parts_for_equipment(self, equipment_id):
         if equipment_id is None:

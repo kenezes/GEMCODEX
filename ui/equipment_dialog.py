@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QLineEdit,
-                             QDialogButtonBox, QMessageBox, QComboBox)
+                             QDialogButtonBox, QMessageBox, QComboBox, QPlainTextEdit)
 
 from .utils import move_equipment_folder_on_rename
 
@@ -23,11 +23,15 @@ class EquipmentDialog(QDialog):
         self.sku_edit = QLineEdit()
         self.category_combo = QComboBox()
         self.parent_combo = QComboBox()
+        self.comment_edit = QPlainTextEdit()
+        self.comment_edit.setPlaceholderText("Комментарий об оборудовании")
+        self.comment_edit.setMaximumHeight(100)
 
         form_layout.addRow("Наименование*:", self.name_edit)
         form_layout.addRow("Артикул:", self.sku_edit)
         form_layout.addRow("Категория*:", self.category_combo)
         form_layout.addRow("Родитель:", self.parent_combo)
+        form_layout.addRow("Комментарий:", self.comment_edit)
 
         layout.addLayout(form_layout)
         
@@ -70,6 +74,7 @@ class EquipmentDialog(QDialog):
             self.sku_edit.setText(data['sku'] or "")
             self.original_name = data['name']
             self.original_sku = data['sku'] or ""
+            self.comment_edit.setPlainText(data.get('comment') or "")
             
             cat_index = self.category_combo.findData(data['category_id'])
             if cat_index != -1: self.category_combo.setCurrentIndex(cat_index)
@@ -91,10 +96,12 @@ class EquipmentDialog(QDialog):
             QMessageBox.warning(self, "Ошибка валидации", "Поля 'Наименование' и 'Категория' обязательны.")
             return
 
+        comment = self.comment_edit.toPlainText().strip()
+
         if self.equipment_id:
-            success, message = self.db.update_equipment(self.equipment_id, name, sku, category_id, parent_id)
+            success, message = self.db.update_equipment(self.equipment_id, name, sku, category_id, parent_id, comment)
         else:
-            success, message = self.db.add_equipment(name, sku, category_id, parent_id)
+            success, message = self.db.add_equipment(name, sku, category_id, parent_id, comment)
 
         if success:
             if self.equipment_id:

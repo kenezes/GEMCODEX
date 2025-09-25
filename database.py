@@ -108,6 +108,13 @@ class Database:
             self.conn.commit()
             logging.info("Database migrated to version 4.")
 
+        if user_version < 5:
+            logging.info("Applying migration to version 5...")
+            self._apply_migration_v5()
+            cursor.execute("PRAGMA user_version = 5;")
+            self.conn.commit()
+            logging.info("Database migrated to version 5.")
+
 
     def _apply_migration_v1(self):
         """Схема БД версии 1."""
@@ -275,6 +282,17 @@ class Database:
                 JOIN part_categories pc ON p.category_id = pc.id
                 WHERE pc.name = 'ножи';
             """)
+
+    def _apply_migration_v5(self):
+        """Миграция для добавления комментария к оборудованию."""
+        if not self.conn:
+            return
+
+        try:
+            self.conn.execute("ALTER TABLE equipment ADD COLUMN comment TEXT;")
+        except sqlite3.OperationalError as exc:
+            # Столбец уже существует
+            logging.warning("Could not add equipment.comment column (maybe already exists): %s", exc)
 
 
     def backup_database(self) -> tuple[bool, str]:
@@ -622,22 +640,44 @@ class Database:
                 self._log_action(f"Удалена категория оборудования #{cat_id}")
             return True, "Категория удалена."
         except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
-    def get_all_equipment(self): return self.fetchall("SELECT id, name, sku, category_id, parent_id FROM equipment ORDER BY name")
-    def add_equipment(self, name, sku, category_id, parent_id=None):
+    def get_all_equipment(self):
+        return self.fetchall("SELECT id, name, sku, category_id, parent_id, comment FROM equipment ORDER BY name")
+
+    def add_equipment(self, name, sku, category_id, parent_id=None, comment=None):
         try:
-            self.execute("INSERT INTO equipment (name, sku, category_id, parent_id) VALUES (?, ?, ?, ?)", (name, sku, category_id, parent_id))
+            self.execute(
+                "INSERT INTO equipment (name, sku, category_id, parent_id, comment) VALUES (?, ?, ?, ?, ?)",
+                (name, sku, category_id, parent_id, comment),
+            )
             if self.conn: self.conn.commit()
             self._log_action(f"Добавлено оборудование: {name} (артикул: {sku or 'нет'}, категория #{category_id})")
             return True, "Оборудование добавлено."
         except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
-    def update_equipment(self, eq_id, name, sku, category_id, parent_id=None):
+    def update_equipment(self, eq_id, name, sku, category_id, parent_id=None, comment=None):
         try:
             if eq_id and eq_id == parent_id: return False, "Оборудование не может быть родителем для самого себя."
-            self.execute("UPDATE equipment SET name=?, sku=?, category_id=?, parent_id=? WHERE id=?", (name, sku, category_id, parent_id, eq_id))
+            self.execute(
+                "UPDATE equipment SET name=?, sku=?, category_id=?, parent_id=?, comment=? WHERE id=?",
+                (name, sku, category_id, parent_id, comment, eq_id),
+            )
             if self.conn: self.conn.commit()
             self._log_action(f"Обновлено оборудование #{eq_id}: {name} (артикул: {sku or 'нет'})")
             return True, "Данные оборудования обновлены."
         except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+
+    def update_equipment_comment(self, eq_id: int, comment: str):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
+        try:
+            self.execute("UPDATE equipment SET comment = ? WHERE id = ?", (comment, eq_id))
+            if self.conn:
+                self.conn.commit()
+            self._log_action(f"Обновлён комментарий оборудования #{eq_id}")
+            return True, "Комментарий обновлен."
+        except sqlite3.Error as e:
+            logging.error("Ошибка обновления комментария оборудования #%s: %s", eq_id, e, exc_info=True)
+            return False, f"Ошибка базы данных: {e}"
     def delete_equipment(self, eq_id):
         if self.fetchone("SELECT 1 FROM equipment_parts WHERE equipment_id = ?", (eq_id,)): return False, "Удаление невозможно: к оборудованию привязаны запчасти."
         if self.fetchone("SELECT 1 FROM replacements WHERE equipment_id = ?", (eq_id,)): return False, "Удаление невозможно: оборудование фигурирует в истории замен."
