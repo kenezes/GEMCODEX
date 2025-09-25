@@ -93,7 +93,7 @@ class KnivesTab(QWidget):
         self.table_view.customContextMenuRequested.connect(self.create_context_menu)
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setStretchLastSection(False)
         # Сортировка по умолчанию: статус, затем дата заточки
         self.table_view.sortByColumn(3, Qt.AscendingOrder) 
 

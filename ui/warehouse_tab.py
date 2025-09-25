@@ -75,8 +75,7 @@ class WarehouseTab(QWidget):
         # Автоширина колонок
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(0, QHeaderView.Stretch) # Наименование растягивается
-        header.setSectionResizeMode(6, QHeaderView.Stretch) # Оборудование растягивается
+        header.setStretchLastSection(False)
 
     def load_categories(self):
         current_cat = self.category_filter.currentData()

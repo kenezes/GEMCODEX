@@ -130,7 +130,7 @@ class ReplacementHistoryTab(QWidget):
         
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.Stretch)
+        header.setStretchLastSection(False)
 
         main_layout.addWidget(filters_group)
         main_layout.addWidget(self.table)

@@ -106,7 +106,7 @@ class EquipmentTab(QWidget):
         
         header = self.parts_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setStretchLastSection(False)
 
         right_layout.addLayout(parts_buttons_layout)
         right_layout.addWidget(self.parts_table)

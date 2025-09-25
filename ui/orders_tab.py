@@ -145,7 +145,7 @@ class OrdersTab(QWidget):
         
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.Stretch)
+        header.setStretchLastSection(False)
 
     def refresh_data(self):
         logging.info("Обновление данных на вкладке 'Заказы'")
