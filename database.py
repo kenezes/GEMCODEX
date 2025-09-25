@@ -328,14 +328,9 @@ class Database:
         if not self.conn:
             return
 
-        try:
-            self.conn.execute(
-                "ALTER TABLE equipment_parts ADD COLUMN requires_replacement INTEGER NOT NULL DEFAULT 0;"
-            )
-        except sqlite3.OperationalError as exc:
+        if not self._ensure_equipment_parts_requires_column(update_schema_version=False):
             logging.warning(
-                "Could not add equipment_parts.requires_replacement column (maybe already exists): %s",
-                exc,
+                "Migration v7: не удалось гарантировать наличие столбца equipment_parts.requires_replacement."
             )
 
 
@@ -798,6 +793,56 @@ class Database:
             return True, "Запчасть отвязана."
         except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
 
+    def _ensure_equipment_parts_requires_column(self, update_schema_version: bool = True) -> bool:
+        """Убеждается, что у таблицы equipment_parts есть колонка requires_replacement."""
+        if not self.conn:
+            logging.error("Не удалось проверить структуру equipment_parts: нет подключения к БД.")
+            return False
+
+        try:
+            cursor = self.conn.execute("PRAGMA table_info(equipment_parts);")
+            columns = {row[1] for row in cursor.fetchall()}
+        except sqlite3.Error as exc:
+            logging.error(
+                "Не удалось получить информацию о столбцах equipment_parts: %s",
+                exc,
+                exc_info=True,
+            )
+            return False
+
+        if "requires_replacement" in columns:
+            return True
+
+        try:
+            self.conn.execute(
+                "ALTER TABLE equipment_parts ADD COLUMN requires_replacement INTEGER NOT NULL DEFAULT 0;"
+            )
+            self.conn.commit()
+            if update_schema_version:
+                try:
+                    cursor = self.conn.execute("PRAGMA user_version;")
+                    current_version = cursor.fetchone()[0]
+                    if current_version < 7:
+                        self.conn.execute("PRAGMA user_version = 7;")
+                        self.conn.commit()
+                except sqlite3.Error as exc:
+                    logging.warning(
+                        "Не удалось обновить user_version после добавления столбца requires_replacement: %s",
+                        exc,
+                        exc_info=True,
+                    )
+            logging.info(
+                "Столбец equipment_parts.requires_replacement успешно добавлен принудительно."
+            )
+            return True
+        except sqlite3.Error as exc:
+            logging.error(
+                "Ошибка при добавлении столбца equipment_parts.requires_replacement: %s",
+                exc,
+                exc_info=True,
+            )
+            return False
+
     def set_equipment_part_requires_replacement(self, equipment_part_id: int, requires: bool):
         link = self.fetchone(
             "SELECT equipment_id, part_id FROM equipment_parts WHERE id = ?",
@@ -806,12 +851,26 @@ class Database:
         if not link:
             return False, None, "Привязка запчасти не найдена."
 
+        if not self._ensure_equipment_parts_requires_column():
+            return (
+                False,
+                link.get("equipment_id"),
+                "Не удалось подготовить таблицу для сохранения признака замены.",
+            )
+
         try:
             requires_value = 1 if requires else 0
-            self.execute(
+            cursor = self.execute(
                 "UPDATE equipment_parts SET requires_replacement = ? WHERE id = ?",
                 (requires_value, equipment_part_id),
             )
+            if cursor is None:
+                return (
+                    False,
+                    link.get("equipment_id"),
+                    "Ошибка базы данных при обновлении признака замены.",
+                )
+
             if self.conn:
                 self.conn.commit()
 
