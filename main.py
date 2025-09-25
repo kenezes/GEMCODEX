@@ -1,8 +1,12 @@
 import sys
 import logging
+from datetime import datetime, timedelta
 from logging import handlers
 from pathlib import Path
-from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget, QWidget, QMessageBox
+from PySide6.QtWidgets import (QApplication, QMainWindow, QTabWidget, QWidget,
+                               QMessageBox, QToolBar)
+from PySide6.QtCore import QTimer
+from PySide6.QtGui import QStyle
 
 from database import Database
 from event_bus import EventBus
@@ -15,6 +19,7 @@ from ui.replacement_history_tab import ReplacementHistoryTab
 from ui.tasks_tab import TasksTab
 from ui.knives_tab import KnivesTab
 from ui.log_tab import LogTab
+from backup_utils import create_application_backup, get_latest_backup_time
 
 def setup_logging_and_paths():
     """Настраивает логирование и создает необходимые каталоги.
@@ -40,16 +45,20 @@ def setup_logging_and_paths():
     return log_file
 
 class MainWindow(QMainWindow):
-    def __init__(self, db, event_bus, log_file: Path):
+    def __init__(self, db, event_bus, log_file: Path, app_root: Path):
         super().__init__()
         self.db = db
         self.event_bus = event_bus
         self.log_file = Path(log_file)
+        self.app_root = Path(app_root)
+        self.backup_dir = Path(self.db.backup_dir)
         self.setWindowTitle("Система управления запчастями")
         self.setGeometry(100, 100, 1200, 800)
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
         self.init_tabs()
+        self.init_backup_toolbar()
+        self.setup_backup_timer()
 
     def init_tabs(self):
         self.dashboard_tab = DashboardTab(self.db, self.event_bus, self)
@@ -79,6 +88,46 @@ class MainWindow(QMainWindow):
         self.log_tab = LogTab(self.log_file, self)
         self.tabs.addTab(self.log_tab, "Логи")
 
+    def init_backup_toolbar(self):
+        toolbar = QToolBar("Инструменты")
+        toolbar.setMovable(False)
+        self.addToolBar(toolbar)
+
+        backup_icon = self.style().standardIcon(QStyle.SP_DialogSaveButton)
+        self.backup_action = toolbar.addAction(backup_icon, "Создать бекап")
+        self.backup_action.setToolTip("Создать резервную копию приложения")
+        self.backup_action.triggered.connect(self.perform_manual_backup)
+
+    def setup_backup_timer(self):
+        self.backup_timer = QTimer(self)
+        self.backup_timer.setInterval(24 * 60 * 60 * 1000)
+        self.backup_timer.timeout.connect(lambda: self.perform_backup(auto=True))
+        self.backup_timer.start()
+        self.ensure_daily_backup()
+
+    def ensure_daily_backup(self):
+        last_backup = get_latest_backup_time(self.backup_dir)
+        if not last_backup or datetime.now() - last_backup >= timedelta(days=1):
+            self.perform_backup(auto=True)
+        else:
+            logging.info("Автоматический бекап не требуется. Последний: %s", last_backup)
+
+    def perform_manual_backup(self):
+        self.perform_backup(auto=False)
+
+    def perform_backup(self, auto: bool):
+        success, message, archive_path = create_application_backup(self.app_root, self.backup_dir)
+        if success:
+            if auto:
+                logging.info("Создан автоматический бекап: %s", archive_path)
+            else:
+                QMessageBox.information(self, "Резервное копирование", message)
+        else:
+            if auto:
+                logging.error("Автоматический бекап не выполнен: %s", message)
+            else:
+                QMessageBox.critical(self, "Ошибка резервного копирования", message)
+
     def closeEvent(self, event):
         logging.info("Application closing...")
         self.db.disconnect()
@@ -103,7 +152,7 @@ def main():
     
     event_bus = EventBus()
 
-    window = MainWindow(db, event_bus, log_file)
+    window = MainWindow(db, event_bus, log_file, Path.cwd())
     window.show()
 
     sys.exit(app.exec())
