@@ -22,7 +22,7 @@ from ui.orders_tab import OrdersTab
 from ui.equipment_tab import EquipmentTab
 from ui.replacement_history_tab import ReplacementHistoryTab
 from ui.tasks_tab import TasksTab
-from ui.knives_tab import KnivesTab
+from ui.sharpening_tab import SharpeningTab
 from ui.log_tab import LogTab
 from backup_utils import create_application_backup, get_latest_backup_time
 
@@ -86,8 +86,8 @@ class MainWindow(QMainWindow):
         self.tasks_tab = TasksTab(self.db, self.event_bus, self)
         self.tabs.addTab(self.tasks_tab, "Задачи")
         
-        self.knives_tab = KnivesTab(self.db, self.event_bus, self)
-        self.tabs.addTab(self.knives_tab, "Ножи")
+        self.sharpening_tab = SharpeningTab(self.db, self.event_bus, self)
+        self.tabs.addTab(self.sharpening_tab, "Заточка")
 
         backup_icon = self.style().standardIcon(QStyle.SP_DialogSaveButton)
         self.log_tab = LogTab(

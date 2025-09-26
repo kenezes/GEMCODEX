@@ -5,14 +5,14 @@ from PySide6.QtCore import QDate
 from .utils import qdate_to_db_string
 
 class SharpenKnivesDialog(QDialog):
-    def __init__(self, selected_knives_count, parent=None):
+    def __init__(self, selected_items_count, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Отправить ножи на заточку")
+        self.setWindowTitle("Отправить комплекты на заточку")
 
         layout = QVBoxLayout(self)
         form_layout = QFormLayout()
 
-        self.info_label = QLabel(f"Выбрано ножей для заточки: <b>{selected_knives_count}</b> шт.")
+        self.info_label = QLabel(f"Выбрано комплектов для заточки: <b>{selected_items_count}</b> шт.")
         self.date_edit = QDateEdit(QDate.currentDate())
         self.date_edit.setCalendarPopup(True)
         self.comment_edit = QLineEdit()
