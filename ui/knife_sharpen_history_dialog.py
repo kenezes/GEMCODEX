@@ -8,7 +8,7 @@ from .utils import db_string_to_ui_string
 class KnifeSharpenHistoryModel(QAbstractTableModel):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._headers = ["Дата", "Нож", "Артикул", "Комментарий"]
+        self._headers = ["Дата", "Комплект", "Артикул", "Комментарий"]
         self._data: list[dict] = []
 
     def rowCount(self, parent: QModelIndex = QModelIndex()) -> int:
@@ -56,7 +56,7 @@ class KnifeSharpenHistoryDialog(QDialog):
         self.db = db
         self.event_bus = event_bus
 
-        self.setWindowTitle("История заточек ножей")
+        self.setWindowTitle("История заточек")
         self.resize(800, 400)
 
         layout = QVBoxLayout(self)

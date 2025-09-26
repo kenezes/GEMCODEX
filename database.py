@@ -13,6 +13,7 @@ class Database:
         self.db_path.parent.mkdir(exist_ok=True)
         self.backup_dir.mkdir(exist_ok=True)
         self._knives_category_id = None
+        self._sharpening_category_ids: set[int] = set()
 
     def _log_action(self, message: str):
         """Записывает действие пользователя в журнал."""
@@ -29,10 +30,7 @@ class Database:
             self.conn.execute("PRAGMA busy_timeout = 5000;")
             logging.info(f"Successfully connected to database: {self.db_path}")
             self.run_migrations()
-            # Кэшируем ID категории "ножи" для производительности
-            knives_cat = self.fetchone("SELECT id FROM part_categories WHERE name = 'ножи'")
-            if knives_cat:
-                self._knives_category_id = knives_cat['id']
+            self._refresh_sharpening_categories()
 
         except sqlite3.Error as e:
             logging.error(f"Database connection error: {e}", exc_info=True)
@@ -44,6 +42,43 @@ class Database:
             self.conn.close()
             self.conn = None
             logging.info("Database connection closed.")
+
+    def _refresh_sharpening_categories(self):
+        """Обновляет кэш ID категорий, для которых включено отслеживание заточек."""
+        self._sharpening_category_ids.clear()
+        self._knives_category_id = None
+        rows = self.fetchall(
+            "SELECT id, name FROM part_categories WHERE name IN ('ножи','утюги')"
+        )
+        for row in rows:
+            cat_id = row["id"]
+            self._sharpening_category_ids.add(cat_id)
+            if row["name"].lower() == "ножи":
+                self._knives_category_id = cat_id
+
+    @staticmethod
+    def _combined_status(sharp_state: str, installation_state: str) -> str:
+        if sharp_state == "затуплен":
+            return "затуплен"
+        if installation_state == "установлен":
+            return "в работе"
+        return "наточен"
+
+    @staticmethod
+    def _fallback_sharp_state(stored_state: Optional[str], status: Optional[str]) -> str:
+        if stored_state in {"заточен", "затуплен"}:
+            return stored_state  # type: ignore[return-value]
+        if status == "затуплен":
+            return "затуплен"
+        return "заточен"
+
+    @staticmethod
+    def _fallback_installation_state(stored_state: Optional[str], status: Optional[str]) -> str:
+        if stored_state in {"установлен", "снят"}:
+            return stored_state  # type: ignore[return-value]
+        if status == "в работе":
+            return "установлен"
+        return "снят"
 
     def execute(self, query: str, params: tuple = ()) -> Optional[sqlite3.Cursor]:
         """Выполняет один SQL-запрос."""
@@ -135,6 +170,13 @@ class Database:
             cursor.execute("PRAGMA user_version = 8;")
             self.conn.commit()
             logging.info("Database migrated to version 8.")
+
+        if user_version < 9:
+            logging.info("Applying migration to version 9...")
+            self._apply_migration_v9()
+            cursor.execute("PRAGMA user_version = 9;")
+            self.conn.commit()
+            logging.info("Database migrated to version 9.")
 
 
     def _apply_migration_v1(self):
@@ -381,7 +423,50 @@ class Database:
                 exc_info=True,
             )
 
+    def _apply_migration_v9(self):
+        """Миграция для расширения учёта заточек."""
+        if not self.conn:
+            return
 
+        cursor = self.conn.cursor()
+
+        try:
+            cursor.execute(
+                "ALTER TABLE knife_tracking ADD COLUMN sharp_state TEXT CHECK(sharp_state IN ('заточен','затуплен')) DEFAULT 'заточен';"
+            )
+        except sqlite3.OperationalError as exc:
+            logging.info("Migration v9: колонка knife_tracking.sharp_state уже существует: %s", exc)
+
+        try:
+            cursor.execute(
+                "ALTER TABLE knife_tracking ADD COLUMN installation_state TEXT CHECK(installation_state IN ('установлен','снят')) DEFAULT 'снят';"
+            )
+        except sqlite3.OperationalError as exc:
+            logging.info("Migration v9: колонка knife_tracking.installation_state уже существует: %s", exc)
+
+        cursor.execute(
+            """
+                UPDATE knife_tracking
+                SET sharp_state = CASE status
+                        WHEN 'затуплен' THEN 'затуплен'
+                        ELSE COALESCE(sharp_state, 'заточен')
+                    END,
+                    installation_state = CASE status
+                        WHEN 'в работе' THEN 'установлен'
+                        ELSE COALESCE(installation_state, 'снят')
+                    END
+            """
+        )
+
+        cursor.execute(
+            """
+                INSERT OR IGNORE INTO knife_tracking (part_id)
+                SELECT p.id
+                FROM parts p
+                JOIN part_categories pc ON p.category_id = pc.id
+                WHERE pc.name IN ('ножи','утюги')
+            """
+        )
 
     def backup_database(self) -> tuple[bool, str]:
         if not self.conn: return False, "Нет подключения к базе данных."
@@ -479,9 +564,20 @@ class Database:
     def get_part_by_id(self, part_id): return self.fetchone("SELECT * FROM parts WHERE id = ?", (part_id,))
     
     def _ensure_knife_tracking(self, cursor, part_id, category_id):
-        """Проверяет и создает запись для отслеживания ножа."""
-        if category_id == self._knives_category_id:
-            cursor.execute("INSERT OR IGNORE INTO knife_tracking (part_id) VALUES (?)", (part_id,))
+        """Проверяет и создаёт запись для отслеживания заточки."""
+        if category_id is None:
+            return
+
+        if category_id not in self._sharpening_category_ids:
+            row = cursor.execute(
+                "SELECT name FROM part_categories WHERE id = ?",
+                (category_id,),
+            ).fetchone()
+            if not row or row["name"].lower() not in {"ножи", "утюги"}:
+                return
+            self._sharpening_category_ids.add(category_id)
+
+        cursor.execute("INSERT OR IGNORE INTO knife_tracking (part_id) VALUES (?)", (part_id,))
     
     def add_part(self, name, sku, qty, min_qty, price, category_id):
         if not self.conn: return False, "Нет подключения к БД."
@@ -1403,66 +1499,289 @@ class Database:
             logging.error("Ошибка при удалении задачи #%s: %s", task_id, e, exc_info=True)
             return False, f"Ошибка базы данных: {e}", {}
         
-    # --- Knives ---
-    def get_all_knives_data(self):
+    # --- Knives / Sharpening ---
+    def get_all_sharpening_items(self):
         query = """
             SELECT
                 p.id, p.name, p.sku, p.qty,
                 kt.status,
                 kt.last_sharpen_date,
                 kt.work_started_at,
-                kt.last_interval_days
+                kt.last_interval_days,
+                COALESCE(kt.sharp_state, CASE kt.status WHEN 'затуплен' THEN 'затуплен' ELSE 'заточен' END) AS sharp_state,
+                COALESCE(kt.installation_state, CASE kt.status WHEN 'в работе' THEN 'установлен' ELSE 'снят' END) AS installation_state
             FROM parts p
             JOIN part_categories pc ON p.category_id = pc.id
             LEFT JOIN knife_tracking kt ON p.id = kt.part_id
-            WHERE pc.name = 'ножи'
+            WHERE pc.name IN ('ножи', 'утюги')
+            ORDER BY p.name
         """
         return self.fetchall(query)
 
-    def update_knife_status(self, part_id, new_status, comment=""):
-        if not self.conn: return False, "Нет подключения к БД."
+    def get_all_knives_data(self):
+        return self.get_all_sharpening_items()
+
+    def toggle_sharp_state(self, part_id: int):
+        if not self.conn:
+            return False, "Нет подключения к БД.", {}
+
         try:
             with self.conn:
                 cursor = self.conn.cursor()
-                # Убеждаемся, что запись отслеживания существует
                 cursor.execute("INSERT OR IGNORE INTO knife_tracking (part_id) VALUES (?)", (part_id,))
-                
-                cursor.execute("SELECT status, work_started_at FROM knife_tracking WHERE part_id = ?", (part_id,))
+                row = cursor.execute(
+                    """
+                        SELECT kt.sharp_state, kt.installation_state, kt.status, kt.work_started_at,
+                               p.name AS part_name
+                        FROM knife_tracking kt
+                        JOIN parts p ON p.id = kt.part_id
+                        WHERE kt.part_id = ?
+                    """,
+                    (part_id,),
+                ).fetchone()
+
+                if not row:
+                    return False, "Не найдена запись отслеживания для выбранного комплекта.", {}
+
+                current_status = row["status"]
+                current_sharp = self._fallback_sharp_state(row["sharp_state"], current_status)
+                current_install = self._fallback_installation_state(row["installation_state"], current_status)
+
+                new_sharp = "затуплен" if current_sharp == "заточен" else "заточен"
+                new_status = self._combined_status(new_sharp, current_install)
+
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                today_str = date.today().isoformat()
+
+                cursor.execute(
+                    """
+                        UPDATE knife_tracking
+                        SET sharp_state = ?,
+                            status = ?,
+                            last_sharpen_date = CASE WHEN ? = 'заточен' THEN ? ELSE last_sharpen_date END,
+                            total_sharpenings = total_sharpenings + CASE WHEN ? = 'заточен' THEN 1 ELSE 0 END
+                        WHERE part_id = ?
+                    """,
+                    (new_sharp, new_status, new_sharp, today_str, new_sharp, part_id),
+                )
+
+                cursor.execute(
+                    """
+                        INSERT INTO knife_status_log (part_id, from_status, to_status, comment, changed_at)
+                        VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        part_id,
+                        current_sharp,
+                        new_sharp,
+                        "Состояние заточки изменено вручную",
+                        timestamp,
+                    ),
+                )
+
+                if new_sharp == "заточен":
+                    cursor.execute(
+                        "INSERT INTO knife_sharpen_log (part_id, date, comment) VALUES (?, ?, ?)",
+                        (
+                            part_id,
+                            today_str,
+                            "Автоматическая запись: кнопка 'Заточен'",
+                        ),
+                    )
+
+                part_name = row["part_name"]
+
+            action_text = "Заточен" if new_sharp == "заточен" else "Затуплен"
+            self._log_action(
+                f"Комплект '{part_name}' (#{part_id}) переведён в состояние '{action_text.lower()}'"
+            )
+            return True, f"Состояние заточки обновлено: {action_text}.", {
+                "sharp_state": new_sharp,
+                "installation_state": current_install,
+            }
+        except sqlite3.Error as exc:
+            logging.error("Ошибка при изменении состояния заточки: %s", exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}", {}
+
+    def toggle_installation_state(self, part_id: int):
+        if not self.conn:
+            return False, "Нет подключения к БД.", {}
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute("INSERT OR IGNORE INTO knife_tracking (part_id) VALUES (?)", (part_id,))
+                row = cursor.execute(
+                    """
+                        SELECT kt.installation_state, kt.sharp_state, kt.status, kt.work_started_at,
+                               kt.last_interval_days, p.name AS part_name
+                        FROM knife_tracking kt
+                        JOIN parts p ON p.id = kt.part_id
+                        WHERE kt.part_id = ?
+                    """,
+                    (part_id,),
+                ).fetchone()
+
+                if not row:
+                    return False, "Не найдена запись отслеживания для выбранного комплекта.", {}
+
+                current_status = row["status"]
+                current_install = self._fallback_installation_state(row["installation_state"], current_status)
+                current_sharp = self._fallback_sharp_state(row["sharp_state"], current_status)
+
+                new_install = "снят" if current_install == "установлен" else "установлен"
+                new_status = self._combined_status(current_sharp, new_install)
+
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                today_str = date.today().isoformat()
+                interval_value = None
+
+                if new_install == "установлен":
+                    cursor.execute(
+                        """
+                            UPDATE knife_tracking
+                            SET installation_state = ?,
+                                status = ?,
+                                work_started_at = ?,
+                                last_interval_days = last_interval_days
+                            WHERE part_id = ?
+                        """,
+                        (new_install, new_status, today_str, part_id),
+                    )
+                else:
+                    interval_value = None
+                    if row["work_started_at"]:
+                        try:
+                            start_date = date.fromisoformat(row["work_started_at"])
+                            interval_value = max((date.today() - start_date).days, 0)
+                        except ValueError:
+                            interval_value = None
+
+                    cursor.execute(
+                        """
+                            UPDATE knife_tracking
+                            SET installation_state = ?,
+                                status = ?,
+                                work_started_at = NULL,
+                                last_interval_days = CASE WHEN ? IS NULL THEN last_interval_days ELSE ? END
+                            WHERE part_id = ?
+                        """,
+                        (new_install, new_status, interval_value, interval_value, part_id),
+                    )
+
+                cursor.execute(
+                    """
+                        INSERT INTO knife_status_log (part_id, from_status, to_status, comment, changed_at)
+                        VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        part_id,
+                        current_install,
+                        new_install,
+                        "Состояние установки изменено вручную",
+                        timestamp,
+                    ),
+                )
+
+                part_name = row["part_name"]
+
+            install_text = "Установлен" if new_install == "установлен" else "Снят"
+            self._log_action(
+                f"Комплект '{part_name}' (#{part_id}) переведён в состояние '{install_text.lower()}'"
+            )
+            return True, f"Состояние установки обновлено: {install_text}.", {
+                "installation_state": new_install,
+                "sharp_state": current_sharp,
+            }
+        except sqlite3.Error as exc:
+            logging.error("Ошибка при изменении состояния установки: %s", exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}", {}
+
+    def update_knife_status(self, part_id, new_status, comment=""):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute("INSERT OR IGNORE INTO knife_tracking (part_id) VALUES (?)", (part_id,))
+
+                cursor.execute(
+                    "SELECT status, work_started_at, sharp_state, installation_state FROM knife_tracking WHERE part_id = ?",
+                    (part_id,),
+                )
                 current_state = cursor.fetchone()
-                
-                if not current_state: # Эта проверка теперь избыточна, но оставим для надежности
-                    return False, "Не удалось создать/найти запись об отслеживании ножа."
+
+                if not current_state:
+                    return False, "Не удалось создать/найти запись об отслеживании комплекта."
 
                 from_status = current_state['status']
+                current_sharp = self._fallback_sharp_state(current_state.get('sharp_state'), from_status)
+                current_install = self._fallback_installation_state(current_state.get('installation_state'), from_status)
+
                 if from_status == new_status:
                     self._log_action(
-                        f"Попытка изменить статус ножа (запчасть #{part_id}), но статус уже '{new_status}'"
+                        f"Попытка изменить статус комплекта #{part_id}, но статус уже '{new_status}'"
                     )
                     return True, "Статус не изменился."
 
                 today_str = date.today().isoformat()
                 timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                
-                if new_status == 'в работе':
-                    cursor.execute("UPDATE knife_tracking SET work_started_at = ? WHERE part_id = ?", (today_str, part_id))
 
-                elif new_status == 'затуплен' and from_status == 'в работе' and current_state['work_started_at']:
-                    start_date = date.fromisoformat(current_state['work_started_at'])
-                    end_date = date.today()
-                    interval = (end_date - start_date).days
-                    cursor.execute("UPDATE knife_tracking SET last_interval_days = ?, work_started_at = NULL WHERE part_id = ?", (interval, part_id))
-                
-                cursor.execute("UPDATE knife_tracking SET status = ? WHERE part_id = ?", (new_status, part_id))
-                cursor.execute("INSERT INTO knife_status_log (part_id, from_status, to_status, comment, changed_at) VALUES (?, ?, ?, ?, ?)",
-                               (part_id, from_status, new_status, comment, timestamp))
+                if new_status == 'в работе':
+                    new_install = 'установлен'
+                    new_sharp = current_sharp
+                    cursor.execute(
+                        "UPDATE knife_tracking SET work_started_at = ?, installation_state = ?, status = ? WHERE part_id = ?",
+                        (today_str, new_install, new_status, part_id),
+                    )
+                else:
+                    if from_status == 'в работе' and current_state['work_started_at']:
+                        try:
+                            start_date = date.fromisoformat(current_state['work_started_at'])
+                            interval = (date.today() - start_date).days
+                            cursor.execute(
+                                "UPDATE knife_tracking SET last_interval_days = ? WHERE part_id = ?",
+                                (interval, part_id),
+                            )
+                        except ValueError:
+                            logging.warning(
+                                "Не удалось вычислить интервал работы для комплекта #%s: некорректная дата %s",
+                                part_id,
+                                current_state['work_started_at'],
+                            )
+
+                    new_install = 'снят'
+                    new_sharp = 'затуплен' if new_status == 'затуплен' else 'заточен'
+                    cursor.execute(
+                        """
+                            UPDATE knife_tracking
+                            SET status = ?,
+                                sharp_state = ?,
+                                installation_state = ?,
+                                work_started_at = NULL
+                            WHERE part_id = ?
+                        """,
+                        (new_status, new_sharp, new_install, part_id),
+                    )
+
+                cursor.execute(
+                    "UPDATE knife_tracking SET sharp_state = ?, installation_state = ? WHERE part_id = ?",
+                    (new_sharp, new_install, part_id),
+                )
+
+                cursor.execute(
+                    "INSERT INTO knife_status_log (part_id, from_status, to_status, comment, changed_at) VALUES (?, ?, ?, ?, ?)",
+                    (part_id, from_status, new_status, comment, timestamp),
+                )
 
             self._log_action(
-                f"Изменён статус ножа (запчасть #{part_id}) с '{from_status}' на '{new_status}'. Комментарий: {comment or 'нет'}"
+                f"Изменён статус комплекта #{part_id} с '{from_status}' на '{new_status}'. Комментарий: {comment or 'нет'}"
             )
-            return True, "Статус ножа успешно обновлен."
-        except Exception as e:
-            logging.error(f"Ошибка транзакции при смене статуса ножа: {e}", exc_info=True)
-            return False, f"Ошибка транзакции: {e}"
+            return True, "Статус успешно обновлён."
+        except Exception as exc:
+            logging.error("Ошибка транзакции при смене статуса комплекта: %s", exc, exc_info=True)
+            return False, f"Ошибка транзакции: {exc}"
 
     def sharpen_knives(self, part_ids, sharpen_date, comment=""):
         if not self.conn: return False, "Нет подключения к БД."
@@ -1474,15 +1793,26 @@ class Database:
                     cursor.execute("INSERT OR IGNORE INTO knife_tracking (part_id) VALUES (?)", (part_id,))
 
                     # Get current status to log the change
-                    cursor.execute("SELECT status FROM knife_tracking WHERE part_id = ?", (part_id,))
+                    cursor.execute(
+                        "SELECT status, sharp_state, installation_state FROM knife_tracking WHERE part_id = ?",
+                        (part_id,),
+                    )
                     res = cursor.fetchone()
                     from_status = res['status'] if res else 'неизвестно'
+                    current_status = res['status'] if res else None
+                    current_sharp = self._fallback_sharp_state(res['sharp_state'] if res else None, current_status)
+                    current_install = self._fallback_installation_state(res['installation_state'] if res else None, current_status)
+                    new_status = self._combined_status('заточен', current_install)
 
                     cursor.execute("""
-                        UPDATE knife_tracking 
-                        SET status = 'наточен', last_sharpen_date = ?, total_sharpenings = total_sharpenings + 1
+                        UPDATE knife_tracking
+                        SET status = ?,
+                            sharp_state = 'заточен',
+                            installation_state = ?,
+                            last_sharpen_date = ?,
+                            total_sharpenings = total_sharpenings + 1
                         WHERE part_id = ?
-                    """, (sharpen_date, part_id))
+                    """, (new_status, current_install, sharpen_date, part_id))
                     
                     # Log the sharpening event
                     cursor.execute("INSERT INTO knife_sharpen_log (part_id, date, comment) VALUES (?, ?, ?)",
@@ -1496,9 +1826,9 @@ class Database:
                             (part_id, timestamp, from_status, 'наточен', f"Заточка: {comment}".strip())
                         )
             self._log_action(
-                f"Заточены ножи (количество: {len(part_ids)}), дата: {sharpen_date}, комментарий: {comment or 'нет'}"
+                f"Заточены комплекты (количество: {len(part_ids)}), дата: {sharpen_date}, комментарий: {comment or 'нет'}"
             )
-            return True, "Ножи успешно отправлены на заточку."
+            return True, "Комплекты успешно отправлены на заточку."
         except Exception as e:
             logging.error(f"Ошибка транзакции при заточке ножей: {e}", exc_info=True)
             return False, f"Ошибка транзакции: {e}"
@@ -1540,7 +1870,7 @@ class Database:
                 )
 
             self._log_action(
-                f"Удалена запись истории заточек #{entry_id} для ножа #{part_id}"
+                f"Удалена запись истории заточек #{entry_id} для комплекта #{part_id}"
             )
             return True, "Запись удалена."
         except sqlite3.Error as exc:
