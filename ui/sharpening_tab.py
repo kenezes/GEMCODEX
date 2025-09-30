@@ -17,7 +17,6 @@ from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QMode
 
 from ui.utils import db_string_to_ui_string
 from .knife_sharpen_history_dialog import KnifeSharpenHistoryDialog
-from .sharpen_knives_dialog import SharpenKnivesDialog
 
 
 class SharpeningTableModel(QAbstractTableModel):
@@ -204,11 +203,9 @@ class SharpeningTab(QWidget):
 
     def _setup_toolbar(self):
         self.toolbar = QToolBar()
-        self.sharpen_button = QPushButton("Отправить на заточку...")
         self.history_button = QPushButton("История заточек")
         self.refresh_button = QPushButton("Обновить")
 
-        self.toolbar.addWidget(self.sharpen_button)
         self.toolbar.addWidget(self.history_button)
 
         spacer = QWidget()
@@ -216,7 +213,6 @@ class SharpeningTab(QWidget):
         self.toolbar.addWidget(spacer)
         self.toolbar.addWidget(self.refresh_button)
 
-        self.sharpen_button.clicked.connect(self.sharpen_selected_items)
         self.history_button.clicked.connect(self.show_sharpen_history)
         self.refresh_button.clicked.connect(self.refresh_data)
 
@@ -278,30 +274,6 @@ class SharpeningTab(QWidget):
             )
             self.table_view.setIndexWidget(proxy_index, widget)
             self._action_widgets.append(widget)
-
-    def get_selected_part_ids(self) -> list[int]:
-        if not self.table_view.selectionModel():
-            return []
-        selected_rows = self.table_view.selectionModel().selectedRows()
-        return [self.proxy_model.mapToSource(index).data(Qt.UserRole) for index in selected_rows]
-
-    def sharpen_selected_items(self):
-        part_ids = self.get_selected_part_ids()
-        if not part_ids:
-            QMessageBox.warning(self, "Внимание", "Выберите один или несколько комплектов для заточки.")
-            return
-
-        dialog = SharpenKnivesDialog(len(part_ids), self)
-        if not dialog.exec():
-            return
-
-        data = dialog.get_data()
-        success, message = self.db.sharpen_knives(part_ids, data["date"], data["comment"])
-        if success:
-            QMessageBox.information(self, "Успех", message)
-            self.event_bus.emit("knives.changed")
-        else:
-            QMessageBox.critical(self, "Ошибка", message)
 
     def show_sharpen_history(self):
         dialog = KnifeSharpenHistoryDialog(self.db, self.event_bus, self)
