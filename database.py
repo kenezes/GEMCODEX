@@ -178,6 +178,13 @@ class Database:
             self.conn.commit()
             logging.info("Database migrated to version 9.")
 
+        if user_version < 10:
+            logging.info("Applying migration to version 10...")
+            self._apply_migration_v10()
+            cursor.execute("PRAGMA user_version = 10;")
+            self.conn.commit()
+            logging.info("Database migrated to version 10.")
+
 
     def _apply_migration_v1(self):
         """Схема БД версии 1."""
@@ -467,6 +474,32 @@ class Database:
                 WHERE pc.name IN ('ножи','утюги')
             """
         )
+
+    def _apply_migration_v10(self):
+        """Добавляет поддержку сложных компонентов оборудования."""
+        if not self.conn:
+            return
+
+        cursor = self.conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                    CREATE TABLE IF NOT EXISTS complex_components (
+                        id INTEGER PRIMARY KEY,
+                        equipment_part_id INTEGER NOT NULL UNIQUE,
+                        equipment_id INTEGER NOT NULL UNIQUE,
+                        FOREIGN KEY (equipment_part_id) REFERENCES equipment_parts(id) ON DELETE CASCADE,
+                        FOREIGN KEY (equipment_id) REFERENCES equipment(id) ON DELETE CASCADE
+                    );
+                """
+            )
+        except sqlite3.Error as exc:
+            logging.error(
+                "Migration v10: ошибка при создании таблицы complex_components: %s",
+                exc,
+                exc_info=True,
+            )
 
     def backup_database(self) -> tuple[bool, str]:
         if not self.conn: return False, "Нет подключения к базе данных."
@@ -904,18 +937,21 @@ class Database:
     def get_parts_for_equipment(self, equipment_id):
         query = """
             SELECT ep.id as equipment_part_id,
+                   ep.equipment_id,
                    p.id as part_id,
                    p.name as part_name,
                    p.sku as part_sku,
                    ep.installed_qty,
                    ep.requires_replacement,
                    pc.name as category_name,
+                   cc.equipment_id AS component_equipment_id,
                    (SELECT MAX(r.date)
                     FROM replacements r
                     WHERE r.part_id = p.id AND r.equipment_id = ep.equipment_id) as last_replacement_date
             FROM equipment_parts ep
                 JOIN parts p ON ep.part_id = p.id
                 LEFT JOIN part_categories pc ON p.category_id = pc.id
+                LEFT JOIN complex_components cc ON cc.equipment_part_id = ep.id
             WHERE ep.equipment_id = ?
             ORDER BY pc.name IS NULL, pc.name, p.name
         """
@@ -928,16 +964,179 @@ class Database:
             return True, "Запчасть успешно привязана."
         except sqlite3.IntegrityError: return False, "Эта запчасть уже привязана к данному оборудованию."
     def detach_part_from_equipment(self, equipment_part_id):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
         try:
-            link = self.fetchone("SELECT equipment_id, part_id FROM equipment_parts WHERE id = ?", (equipment_part_id,))
-            self.execute("DELETE FROM equipment_parts WHERE id = ?", (equipment_part_id,))
-            if self.conn: self.conn.commit()
-            if link:
-                self._log_action(f"Отвязана запчасть #{link['part_id']} от оборудования #{link['equipment_id']}")
-            else:
-                self._log_action(f"Отвязана запчасть от оборудования, связь #{equipment_part_id}")
+            with self.conn:
+                cursor = self.conn.cursor()
+                link = cursor.execute(
+                    "SELECT equipment_id, part_id FROM equipment_parts WHERE id = ?",
+                    (equipment_part_id,),
+                ).fetchone()
+
+                if not link:
+                    return False, "Привязка запчасти не найдена."
+
+                component_row = cursor.execute(
+                    "SELECT equipment_id FROM complex_components WHERE equipment_part_id = ?",
+                    (equipment_part_id,),
+                ).fetchone()
+
+                if component_row:
+                    component_equipment_id = component_row["equipment_id"]
+                    has_children = cursor.execute(
+                        "SELECT 1 FROM equipment_parts WHERE equipment_id = ? LIMIT 1",
+                        (component_equipment_id,),
+                    ).fetchone()
+                    if has_children:
+                        return False, "Нельзя отвязать сложный компонент, к которому привязаны запчасти."
+
+                    cursor.execute(
+                        "DELETE FROM complex_components WHERE equipment_part_id = ?",
+                        (equipment_part_id,),
+                    )
+                    cursor.execute(
+                        "DELETE FROM equipment WHERE id = ?",
+                        (component_equipment_id,),
+                    )
+
+                cursor.execute(
+                    "DELETE FROM equipment_parts WHERE id = ?",
+                    (equipment_part_id,),
+                )
+
+            self._log_action(
+                f"Отвязана запчасть #{link['part_id']} от оборудования #{link['equipment_id']}"
+            )
             return True, "Запчасть отвязана."
-        except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+        except sqlite3.Error as e:
+            logging.error(
+                "Ошибка при отвязке запчасти #%s: %s", equipment_part_id, e, exc_info=True
+            )
+            return False, f"Ошибка базы данных: {e}"
+
+    def mark_equipment_part_as_complex(self, equipment_part_id: int):
+        if not self.conn:
+            return False, "Нет подключения к БД.", {}
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                part_row = cursor.execute(
+                    """
+                        SELECT ep.equipment_id, ep.part_id, p.name AS part_name, p.sku AS part_sku,
+                               e.category_id
+                        FROM equipment_parts ep
+                        JOIN parts p ON ep.part_id = p.id
+                        JOIN equipment e ON ep.equipment_id = e.id
+                        WHERE ep.id = ?
+                    """,
+                    (equipment_part_id,),
+                ).fetchone()
+
+                if not part_row:
+                    return False, "Запчасть не найдена.", {}
+
+                existing = cursor.execute(
+                    "SELECT equipment_id FROM complex_components WHERE equipment_part_id = ?",
+                    (equipment_part_id,),
+                ).fetchone()
+                if existing:
+                    return False, "Запчасть уже является сложным компонентом.", {
+                        "equipment_id": existing["equipment_id"],
+                    }
+
+                cursor.execute(
+                    "INSERT INTO equipment (name, sku, category_id, parent_id, comment) VALUES (?, ?, ?, ?, ?)",
+                    (
+                        part_row["part_name"],
+                        part_row["part_sku"],
+                        part_row["category_id"],
+                        part_row["equipment_id"],
+                        None,
+                    ),
+                )
+                component_equipment_id = cursor.lastrowid
+
+                cursor.execute(
+                    "INSERT INTO complex_components (equipment_part_id, equipment_id) VALUES (?, ?)",
+                    (equipment_part_id, component_equipment_id),
+                )
+
+            self._log_action(
+                f"Запчасть #{part_row['part_id']} превращена в сложный компонент для оборудования #{part_row['equipment_id']}"
+            )
+            return True, "Запчасть отмечена как сложный компонент.", {
+                "equipment_id": component_equipment_id,
+            }
+        except sqlite3.Error as e:
+            logging.error(
+                "Ошибка при создании сложного компонента на основе связи #%s: %s",
+                equipment_part_id,
+                e,
+                exc_info=True,
+            )
+            return False, f"Ошибка базы данных: {e}", {}
+
+    def unmark_equipment_part_complex(self, equipment_part_id: int):
+        if not self.conn:
+            return False, "Нет подключения к БД.", {}
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                mapping = cursor.execute(
+                    "SELECT equipment_id FROM complex_components WHERE equipment_part_id = ?",
+                    (equipment_part_id,),
+                ).fetchone()
+
+                if not mapping:
+                    return False, "Запчасть не является сложным компонентом.", {}
+
+                component_equipment_id = mapping["equipment_id"]
+
+                has_children = cursor.execute(
+                    "SELECT 1 FROM equipment_parts WHERE equipment_id = ? LIMIT 1",
+                    (component_equipment_id,),
+                ).fetchone()
+                if has_children:
+                    return False, (
+                        "Нельзя преобразовать компонент обратно: к нему привязаны другие запчасти."
+                    ), {}
+
+                cursor.execute(
+                    "DELETE FROM complex_components WHERE equipment_part_id = ?",
+                    (equipment_part_id,),
+                )
+                cursor.execute(
+                    "DELETE FROM equipment WHERE id = ?",
+                    (component_equipment_id,),
+                )
+
+            self._log_action(
+                f"Запчасть-связь #{equipment_part_id} больше не является сложным компонентом"
+            )
+            return True, "Запчасть преобразована в обычную.", {
+                "removed_equipment_id": component_equipment_id,
+            }
+        except sqlite3.Error as e:
+            logging.error(
+                "Ошибка при удалении сложного компонента #%s: %s",
+                equipment_part_id,
+                e,
+                exc_info=True,
+            )
+            return False, f"Ошибка базы данных: {e}", {}
+
+    def get_complex_component_equipment_id(self, equipment_part_id: int) -> Optional[int]:
+        row = self.fetchone(
+            "SELECT equipment_id FROM complex_components WHERE equipment_part_id = ?",
+            (equipment_part_id,),
+        )
+        if row:
+            return row["equipment_id"]
+        return None
 
     def _ensure_equipment_parts_requires_column(self, update_schema_version: bool = True) -> bool:
         """Убеждается, что у таблицы equipment_parts есть колонка requires_replacement."""
@@ -1151,7 +1350,23 @@ class Database:
         rows = self.fetchall(
             "SELECT DISTINCT equipment_id FROM equipment_parts WHERE requires_replacement = 1"
         )
-        return {row['equipment_id'] for row in rows}
+        flagged: set[int] = {row['equipment_id'] for row in rows}
+        if not flagged:
+            return set()
+
+        equipment_rows = self.get_all_equipment()
+        parent_map = {row['id']: row.get('parent_id') for row in equipment_rows}
+
+        result = set(flagged)
+        stack = list(flagged)
+        while stack:
+            current_id = stack.pop()
+            parent_id = parent_map.get(current_id)
+            if parent_id and parent_id not in result:
+                result.add(parent_id)
+                stack.append(parent_id)
+
+        return result
     def get_unattached_parts(self, equipment_id):
         query = """
             SELECT p.id, p.name, p.sku, p.qty, pc.name as category_name
@@ -1509,7 +1724,13 @@ class Database:
                 kt.work_started_at,
                 kt.last_interval_days,
                 COALESCE(kt.sharp_state, CASE kt.status WHEN 'затуплен' THEN 'затуплен' ELSE 'заточен' END) AS sharp_state,
-                COALESCE(kt.installation_state, CASE kt.status WHEN 'в работе' THEN 'установлен' ELSE 'снят' END) AS installation_state
+                COALESCE(kt.installation_state, CASE kt.status WHEN 'в работе' THEN 'установлен' ELSE 'снят' END) AS installation_state,
+                (
+                    SELECT GROUP_CONCAT(eq.name, ', ')
+                    FROM equipment_parts ep
+                    JOIN equipment eq ON ep.equipment_id = eq.id
+                    WHERE ep.part_id = p.id
+                ) AS equipment_list
             FROM parts p
             JOIN part_categories pc ON p.category_id = pc.id
             LEFT JOIN knife_tracking kt ON p.id = kt.part_id
