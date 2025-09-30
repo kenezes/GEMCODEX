@@ -2,7 +2,8 @@ import logging
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QMessageBox, QSplitter, QTreeWidget, QTreeWidgetItem,
                              QTableWidget, QTableWidgetItem, QHeaderView, QToolButton,
-                             QLabel, QPlainTextEdit, QStyle, QCheckBox)
+                             QLabel, QPlainTextEdit, QStyle, QCheckBox, QMenu)
+from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt, QSize
 
 from .equipment_category_manager_dialog import EquipmentCategoryManagerDialog
@@ -20,6 +21,8 @@ class EquipmentTab(QWidget):
         self.current_equipment_id = None
         self._comment_updating = False
         self._comment_dirty = False
+        self._expanded_components: set[int] = set()
+        self._row_parts: list[dict | None] = []
         self.init_ui()
         self.load_tree_data()
         self.update_buttons_state()
@@ -110,7 +113,8 @@ class EquipmentTab(QWidget):
         ])
         self.parts_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.parts_table.setEditTriggers(QTableWidget.NoEditTriggers)
-        
+        self.parts_table.setContextMenuPolicy(Qt.CustomContextMenu)
+
         header = self.parts_table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
@@ -141,6 +145,7 @@ class EquipmentTab(QWidget):
         self.save_comment_button.clicked.connect(self.save_equipment_comment)
         self.only_requires_equipment_checkbox.toggled.connect(self.on_equipment_filter_toggled)
         self.only_requires_parts_checkbox.toggled.connect(self.on_parts_filter_toggled)
+        self.parts_table.customContextMenuRequested.connect(self._show_parts_context_menu)
 
     def update_buttons_state(self):
         selected_item = self.tree.currentItem()
@@ -343,86 +348,308 @@ class EquipmentTab(QWidget):
             QMessageBox.critical(self, "Ошибка", message)
 
     def load_parts_for_equipment(self, equipment_id):
-        if equipment_id is None:
-            self.parts_table.setRowCount(0)
-            return
-
-        parts = self.db.get_parts_for_equipment(equipment_id)
         self.parts_table.setRowCount(0)
         self.parts_table.clearSpans()
+        self._row_parts.clear()
+
+        if equipment_id is None:
+            return
+
+        part_tree = self._build_part_tree(equipment_id, level=0, parent_equipment_id=None)
+        visible_part_ids = self._collect_part_ids(part_tree)
+        if visible_part_ids:
+            self._expanded_components.intersection_update(visible_part_ids)
 
         filter_active = self.only_requires_parts_checkbox.isChecked()
-        parts_to_display = []
-        for part in parts:
-            part['equipment_id'] = equipment_id
-            if filter_active and not part.get('requires_replacement'):
-                continue
-            parts_to_display.append(part)
+        if filter_active:
+            part_tree = self._filter_part_tree(part_tree)
 
+        self._populate_parts_table(part_tree)
+
+    def _build_part_tree(self, equipment_id: int, level: int, parent_equipment_id: int | None) -> list[dict]:
+        tree: list[dict] = []
+        for part in self.db.get_parts_for_equipment(equipment_id):
+            component_equipment_id = part.get('component_equipment_id')
+            entry: dict = {
+                'equipment_part_id': part['equipment_part_id'],
+                'part_id': part['part_id'],
+                'part_name': part['part_name'],
+                'part_sku': part.get('part_sku'),
+                'installed_qty': part['installed_qty'],
+                'requires_replacement': part.get('requires_replacement'),
+                'category_name': part.get('category_name'),
+                'last_replacement_date': part.get('last_replacement_date') or '',
+                'equipment_id': equipment_id,
+                'component_equipment_id': component_equipment_id,
+                'level': level,
+                'parent_equipment_id': parent_equipment_id,
+            }
+
+            children: list[dict] = []
+            if component_equipment_id:
+                children = self._build_part_tree(component_equipment_id, level + 1, equipment_id)
+            entry['children'] = children
+            entry['has_descendants'] = bool(children)
+            tree.append(entry)
+        return tree
+
+    def _collect_part_ids(self, part_tree: list[dict]) -> set[int]:
+        ids: set[int] = set()
+        for entry in part_tree:
+            equipment_part_id = entry.get('equipment_part_id')
+            if equipment_part_id:
+                ids.add(equipment_part_id)
+            ids.update(self._collect_part_ids(entry.get('children', [])))
+        return ids
+
+    def _filter_part_tree(self, part_tree: list[dict]) -> list[dict]:
+        filtered: list[dict] = []
+        for entry in part_tree:
+            filtered_children = self._filter_part_tree(entry.get('children', []))
+            include_entry = bool(entry.get('requires_replacement'))
+            if filtered_children:
+                include_entry = True
+            if include_entry:
+                new_entry = entry.copy()
+                new_entry['children'] = filtered_children
+                filtered.append(new_entry)
+        return filtered
+
+    def _populate_parts_table(self, part_tree: list[dict]):
         current_category = None
         row_index = 0
-        part_row_number = 1
-        for part in parts_to_display:
-            
-            category_name = part.get('category_name') or "Без категории"
-            if category_name != current_category:
-                self.parts_table.insertRow(row_index)
-                header_item = QTableWidgetItem(category_name)
-                header_font = header_item.font()
-                header_font.setBold(True)
-                header_item.setFont(header_font)
-                header_item.setFlags(Qt.ItemIsEnabled)
-                header_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-                self.parts_table.setItem(row_index, 0, header_item)
-                self.parts_table.setSpan(row_index, 0, 1, self.parts_table.columnCount())
-                header_row_item = QTableWidgetItem("")
-                header_row_item.setFlags(Qt.ItemIsEnabled)
-                self.parts_table.setVerticalHeaderItem(row_index, header_row_item)
-                current_category = category_name
-                row_index += 1
+        part_counter = 1
 
-            self.parts_table.insertRow(row_index)
-            self.parts_table.setItem(row_index, 0, QTableWidgetItem(part['part_name']))
-            self.parts_table.setItem(row_index, 1, QTableWidgetItem(part['part_sku'] or ""))
-            self.parts_table.setItem(row_index, 2, QTableWidgetItem(str(part['installed_qty'])))
+        for entry in part_tree:
+            if entry.get('level', 0) == 0:
+                category_name = entry.get('category_name') or 'Без категории'
+                if category_name != current_category:
+                    row_index = self._insert_category_header(row_index, category_name)
+                    current_category = category_name
+            row_index, part_counter = self._insert_part_row(entry, row_index, part_counter)
 
-            last_replacement_str = part.get('last_replacement_date', '')
-            self.parts_table.setItem(row_index, 3, QTableWidgetItem(last_replacement_str))
+        self.parts_table.resizeColumnsToContents()
 
-            requires_button = QPushButton()
-            self._update_requires_replacement_button(requires_button, part)
-            requires_button.clicked.connect(
-                lambda _, p=part, b=requires_button: self.on_requires_replacement_button_clicked(p, b)
+    def _insert_category_header(self, row_index: int, category_name: str) -> int:
+        self.parts_table.insertRow(row_index)
+        header_item = QTableWidgetItem(category_name)
+        header_font = header_item.font()
+        header_font.setBold(True)
+        header_item.setFont(header_font)
+        header_item.setFlags(Qt.ItemIsEnabled)
+        header_item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.parts_table.setItem(row_index, 0, header_item)
+        self.parts_table.setSpan(row_index, 0, 1, self.parts_table.columnCount())
+
+        header_row_item = QTableWidgetItem('')
+        header_row_item.setFlags(Qt.ItemIsEnabled)
+        self.parts_table.setVerticalHeaderItem(row_index, header_row_item)
+        self._row_parts.insert(row_index, None)
+
+        return row_index + 1
+
+    def _insert_part_row(self, entry: dict, row_index: int, part_counter: int) -> tuple[int, int]:
+        self.parts_table.insertRow(row_index)
+
+        part_copy = entry.copy()
+        part_copy['row_type'] = 'part'
+        part_copy['children'] = entry.get('children', [])
+        part_copy['has_descendants'] = entry.get('has_descendants', False)
+        self._row_parts.insert(row_index, part_copy)
+
+        name_item = QTableWidgetItem('')
+        name_item.setFlags(Qt.ItemIsEnabled)
+        self.parts_table.setItem(row_index, 0, name_item)
+
+        sku_item = QTableWidgetItem(part_copy.get('part_sku') or '')
+        sku_item.setFlags(Qt.ItemIsEnabled)
+        self.parts_table.setItem(row_index, 1, sku_item)
+
+        qty_item = QTableWidgetItem(str(part_copy.get('installed_qty', '')))
+        qty_item.setFlags(Qt.ItemIsEnabled)
+        self.parts_table.setItem(row_index, 2, qty_item)
+
+        last_replacement = part_copy.get('last_replacement_date') or ''
+        last_item = QTableWidgetItem(last_replacement)
+        last_item.setFlags(Qt.ItemIsEnabled)
+        self.parts_table.setItem(row_index, 3, last_item)
+
+        requires_button = QPushButton()
+        self._update_requires_replacement_button(requires_button, part_copy)
+        requires_button.clicked.connect(
+            lambda _, p=part_copy, b=requires_button: self.on_requires_replacement_button_clicked(p, b)
+        )
+
+        row_number_item = QTableWidgetItem(str(part_counter))
+        row_number_item.setTextAlignment(Qt.AlignCenter)
+        row_number_item.setFlags(Qt.ItemIsEnabled)
+        self.parts_table.setVerticalHeaderItem(row_index, row_number_item)
+        part_counter += 1
+
+        actions_widget = QWidget()
+        actions_layout = QHBoxLayout(actions_widget)
+        actions_layout.setContentsMargins(0, 0, 0, 0)
+
+        replace_button = QPushButton('Заменить')
+        replace_button.clicked.connect(lambda _, p=part_copy: self.replace_part(p))
+
+        detach_button = QPushButton('Удалить привязку')
+        detach_button.clicked.connect(lambda _, p=part_copy: self.detach_part(p))
+
+        folder_button = QPushButton('Папка')
+        folder_button.clicked.connect(
+            lambda _, pn=part_copy.get('part_name', ''), sku=part_copy.get('part_sku'): self.open_part_folder_location(pn, sku)
+        )
+
+        actions_layout.addWidget(replace_button)
+        actions_layout.addWidget(detach_button)
+        actions_layout.addWidget(folder_button)
+        actions_layout.addStretch()
+        actions_layout.addWidget(requires_button)
+
+        self.parts_table.setCellWidget(row_index, 4, actions_widget)
+
+        name_widget = self._create_part_name_widget(part_copy)
+        self.parts_table.setCellWidget(row_index, 0, name_widget)
+
+        if part_copy.get('component_equipment_id'):
+            self._apply_complex_row_style(row_index, name_widget, actions_widget)
+
+        row_index += 1
+
+        if (
+            part_copy.get('children')
+            and part_copy.get('equipment_part_id') in self._expanded_components
+        ):
+            for child in part_copy['children']:
+                row_index, part_counter = self._insert_part_row(child, row_index, part_counter)
+
+        return row_index, part_counter
+
+    def _create_part_name_widget(self, part_data: dict) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(4, 0, 0, 0)
+
+        indent_level = max(0, part_data.get('level', 0))
+        if indent_level:
+            layout.addSpacing(indent_level * 20)
+
+        if part_data.get('component_equipment_id'):
+            toggle_button = QToolButton()
+            toggle_button.setAutoRaise(True)
+            toggle_button.setCheckable(True)
+            is_expanded = part_data.get('equipment_part_id') in self._expanded_components
+            toggle_button.setChecked(is_expanded)
+            toggle_button.setArrowType(Qt.DownArrow if is_expanded else Qt.RightArrow)
+            toggle_button.clicked.connect(
+                lambda checked, epid=part_data.get('equipment_part_id'): self._toggle_component_expansion(epid, checked)
             )
+            layout.addWidget(toggle_button)
+        else:
+            layout.addSpacing(16)
 
-            row_number_item = QTableWidgetItem(str(part_row_number))
-            row_number_item.setTextAlignment(Qt.AlignCenter)
-            row_number_item.setFlags(Qt.ItemIsEnabled)
-            self.parts_table.setVerticalHeaderItem(row_index, row_number_item)
-            part_row_number += 1
+        name_label = QLabel(part_data.get('part_name', ''))
+        layout.addWidget(name_label)
+        layout.addStretch()
+        return container
 
-            # Кнопки действий
-            actions_widget = QWidget()
-            actions_layout = QHBoxLayout(actions_widget)
-            actions_layout.setContentsMargins(0, 0, 0, 0)
+    def _toggle_component_expansion(self, equipment_part_id: int, expanded: bool):
+        if expanded:
+            self._expanded_components.add(equipment_part_id)
+        else:
+            self._expanded_components.discard(equipment_part_id)
 
-            replace_button = QPushButton("Заменить")
-            detach_button = QPushButton("Удалить привязку")
+        if self.current_equipment_id:
+            self.load_parts_for_equipment(self.current_equipment_id)
 
-            replace_button.clicked.connect(lambda _, p=part: self.replace_part(p))
-            detach_button.clicked.connect(lambda _, epid=part['equipment_part_id'], pn=part['part_name']: self.detach_part(epid, pn))
+    def _apply_complex_row_style(self, row_index: int, name_widget: QWidget, actions_widget: QWidget):
+        highlight = QColor('#e3f2fd')
+        for column in range(self.parts_table.columnCount()):
+            item = self.parts_table.item(row_index, column)
+            if item:
+                item.setBackground(highlight)
+        name_widget.setStyleSheet('background-color: #e3f2fd;')
+        actions_widget.setStyleSheet('background-color: #e3f2fd;')
 
-            folder_button = QPushButton("Папка")
-            folder_button.clicked.connect(lambda _, pn=part['part_name'], sku=part['part_sku']: self.open_part_folder_location(pn, sku))
+    def _show_parts_context_menu(self, position):
+        row = self.parts_table.rowAt(position.y())
+        if row < 0 or row >= len(self._row_parts):
+            return
 
-            actions_layout.addWidget(replace_button)
-            actions_layout.addWidget(detach_button)
-            actions_layout.addWidget(folder_button)
-            actions_layout.addStretch()
-            actions_layout.addWidget(requires_button)
+        part_data = self._row_parts[row]
+        if not part_data:
+            return
 
-            self.parts_table.setCellWidget(row_index, 4, actions_widget)
-            row_index += 1
+        menu = QMenu(self)
+        component_equipment_id = part_data.get('component_equipment_id')
+
+        if component_equipment_id:
+            unset_action = menu.addAction('Сделать обычной запчастью')
+            if part_data.get('has_descendants'):
+                unset_action.setEnabled(False)
+            unset_action.triggered.connect(lambda: self._unset_complex_component(part_data))
+        else:
+            set_action = menu.addAction('Сделать сложным компонентом')
+            set_action.triggered.connect(lambda: self._set_complex_component(part_data))
+
+        if not menu.actions():
+            return
+
+        menu.exec(self.parts_table.viewport().mapToGlobal(position))
+
+    def _set_complex_component(self, part_data: dict):
+        equipment_part_id = part_data.get('equipment_part_id')
+        if not equipment_part_id:
+            return
+
+        success, message, _ = self.db.mark_equipment_part_as_complex(equipment_part_id)
+        if not success:
+            QMessageBox.warning(self, 'Сложный компонент', message)
+            return
+
+        QMessageBox.information(self, 'Сложный компонент', message)
+        self._expanded_components.add(equipment_part_id)
+
+        parent_equipment_id = part_data.get('equipment_id')
+        if parent_equipment_id:
+            self.event_bus.emit('equipment_parts_changed', parent_equipment_id)
+        self.event_bus.emit('equipment.changed')
+
+        if self.current_equipment_id:
+            self.load_parts_for_equipment(self.current_equipment_id)
+
+    def _unset_complex_component(self, part_data: dict):
+        equipment_part_id = part_data.get('equipment_part_id')
+        part_name = part_data.get('part_name', '')
+        if not equipment_part_id:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            'Сложный компонент',
+            f"Сделать запчасть '{part_name}' обычной?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        success, message, _ = self.db.unmark_equipment_part_complex(equipment_part_id)
+        if not success:
+            QMessageBox.warning(self, 'Сложный компонент', message)
+            return
+
+        QMessageBox.information(self, 'Сложный компонент', message)
+        self._expanded_components.discard(equipment_part_id)
+
+        parent_equipment_id = part_data.get('equipment_id')
+        if parent_equipment_id:
+            self.event_bus.emit('equipment_parts_changed', parent_equipment_id)
+        self.event_bus.emit('equipment.changed')
+
+        if self.current_equipment_id:
+            self.load_parts_for_equipment(self.current_equipment_id)
 
     def manage_categories(self):
         dialog = EquipmentCategoryManagerDialog(self.db, self)
@@ -504,15 +731,34 @@ class EquipmentTab(QWidget):
             dialog = AttachPartDialog(self.db, self.event_bus, self.current_equipment_id, self)
             dialog.exec()
 
-    def detach_part(self, equipment_part_id, part_name):
-        reply = QMessageBox.question(self, "Удаление привязки",
-                                   f"Вы уверены, что хотите отвязать запчасть '{part_name}'?",
-                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if reply == QMessageBox.Yes:
-            success, message = self.db.detach_part_from_equipment(equipment_part_id)
-            QMessageBox.information(self, "Результат", message)
-            if success:
-                self.event_bus.emit("equipment_parts_changed", self.current_equipment_id)
+    def detach_part(self, part_data: dict):
+        equipment_part_id = part_data.get('equipment_part_id')
+        part_name = part_data.get('part_name', '')
+        if not equipment_part_id:
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Удаление привязки",
+            f"Вы уверены, что хотите отвязать запчасть '{part_name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        success, message = self.db.detach_part_from_equipment(equipment_part_id)
+        QMessageBox.information(self, "Результат", message)
+        if not success:
+            return
+
+        self._expanded_components.discard(equipment_part_id)
+        target_equipment_id = part_data.get('equipment_id') or self.current_equipment_id
+        if target_equipment_id:
+            self.event_bus.emit("equipment_parts_changed", target_equipment_id)
+        self.event_bus.emit('equipment.changed')
+        if self.current_equipment_id:
+            self.load_parts_for_equipment(self.current_equipment_id)
 
     def on_requires_replacement_button_clicked(self, part_data, button):
         requires_replacement = bool(part_data.get('requires_replacement'))
@@ -613,10 +859,8 @@ class EquipmentTab(QWidget):
     def on_equipment_parts_changed(self, equipment_id):
         logging.info(f"Event 'equipment_parts_changed' received for equipment_id: {equipment_id}")
         self.load_tree_data()
-        if self.current_equipment_id == equipment_id:
-            logging.info(
-                f"Currently selected equipment matches ({self.current_equipment_id}). Parts list refreshed."
-            )
+        if self.current_equipment_id:
+            self.load_parts_for_equipment(self.current_equipment_id)
 
     def on_parts_changed(self):
         if self.current_equipment_id:

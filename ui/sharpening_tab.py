@@ -20,7 +20,7 @@ from .knife_sharpen_history_dialog import KnifeSharpenHistoryDialog
 
 
 class SharpeningTableModel(QAbstractTableModel):
-    ACTION_COLUMN = 5
+    ACTION_COLUMN = 6
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -30,6 +30,7 @@ class SharpeningTableModel(QAbstractTableModel):
             "Кол-во (склад)",
             "Последняя заточка",
             "Интервал, дней",
+            "Аппарат",
             "Состояния",
         ]
         self._data: list[dict] = []
@@ -60,6 +61,9 @@ class SharpeningTableModel(QAbstractTableModel):
                 last_interval = row_data.get("last_interval_days")
                 return str(last_interval) if last_interval is not None else ""
             if column == 5:
+                equipment = row_data.get("equipment_list")
+                return equipment or ""
+            if column == 6:
                 sharp_state = row_data.get("sharp_state")
                 install_state = row_data.get("installation_state")
                 states: list[str] = []
