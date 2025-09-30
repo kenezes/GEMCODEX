@@ -9,9 +9,14 @@ from PySide6.QtCore import Qt, QSize
 from .equipment_category_manager_dialog import EquipmentCategoryManagerDialog
 from .equipment_dialog import EquipmentDialog
 from .attach_part_dialog import AttachPartDialog
+from .edit_attached_part_dialog import EditAttachedPartDialog
 from .replacement_dialog import ReplacementDialog
 from .task_dialog import TaskDialog
-from .utils import open_part_folder as open_part_folder_fs, open_equipment_folder as open_equipment_folder_fs
+from .utils import (
+    open_part_folder as open_part_folder_fs,
+    open_equipment_folder as open_equipment_folder_fs,
+    move_part_folder_on_rename,
+)
 
 class EquipmentTab(QWidget):
     def __init__(self, db, event_bus, parent=None):
@@ -582,21 +587,75 @@ class EquipmentTab(QWidget):
             return
 
         menu = QMenu(self)
+        edit_action = menu.addAction('Редактировать привязанную запчасть')
+        edit_action.triggered.connect(lambda: self._edit_attached_part(part_data))
+
         component_equipment_id = part_data.get('component_equipment_id')
 
-        if component_equipment_id:
+        if component_equipment_id is not None:
+            menu.addSeparator()
             unset_action = menu.addAction('Сделать обычной запчастью')
             if part_data.get('has_descendants'):
                 unset_action.setEnabled(False)
             unset_action.triggered.connect(lambda: self._unset_complex_component(part_data))
         else:
+            menu.addSeparator()
             set_action = menu.addAction('Сделать сложным компонентом')
             set_action.triggered.connect(lambda: self._set_complex_component(part_data))
 
-        if not menu.actions():
+        menu.exec(self.parts_table.viewport().mapToGlobal(position))
+
+    def _edit_attached_part(self, part_data: dict):
+        equipment_part_id = part_data.get('equipment_part_id')
+        equipment_id = part_data.get('equipment_id')
+        part_id = part_data.get('part_id')
+
+        if not equipment_part_id or not part_id:
             return
 
-        menu.exec(self.parts_table.viewport().mapToGlobal(position))
+        installed_qty = part_data.get('installed_qty') or 1
+        dialog = EditAttachedPartDialog(
+            part_data.get('part_name', ''),
+            part_data.get('part_sku', ''),
+            installed_qty,
+            self,
+        )
+
+        if not dialog.exec():
+            return
+
+        new_name, new_sku, new_qty = dialog.get_values()
+        success, message, payload = self.db.update_attached_part(
+            equipment_part_id,
+            new_name,
+            new_sku,
+            new_qty,
+        )
+
+        if not success:
+            QMessageBox.warning(self, 'Редактирование запчасти', message)
+            return
+
+        old_name = part_data.get('part_name', '')
+        old_sku = part_data.get('part_sku', '')
+        if old_name != new_name or old_sku != new_sku:
+            move_part_folder_on_rename(old_name, old_sku, new_name, new_sku, self)
+
+        QMessageBox.information(self, 'Редактирование запчасти', message)
+
+        payload = payload or {}
+        target_equipment_id = payload.get('equipment_id') or equipment_id
+        target_part_id = payload.get('part_id') or part_id
+        name_changed = payload.get('name_changed', old_name != new_name or old_sku != new_sku)
+
+        if target_equipment_id:
+            self.event_bus.emit('equipment_parts_changed', target_equipment_id)
+
+        if target_part_id:
+            self.event_bus.emit('parts.changed')
+
+        if name_changed:
+            self.event_bus.emit('equipment.changed')
 
     def _set_complex_component(self, part_data: dict):
         equipment_part_id = part_data.get('equipment_part_id')

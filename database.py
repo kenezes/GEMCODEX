@@ -1016,6 +1016,89 @@ class Database:
             )
             return False, f"Ошибка базы данных: {e}"
 
+    def update_attached_part(self, equipment_part_id: int, name: str, sku: str, installed_qty: int):
+        """Обновляет данные привязанной запчасти (наименование, артикул, количество)."""
+        if not self.conn:
+            return False, "Нет подключения к БД.", {}
+
+        if installed_qty <= 0:
+            return False, "Установленное количество должно быть больше нуля.", {}
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                link = cursor.execute(
+                    "SELECT equipment_id, part_id, installed_qty FROM equipment_parts WHERE id = ?",
+                    (equipment_part_id,),
+                ).fetchone()
+
+                if not link:
+                    return False, "Привязка запчасти не найдена.", {}
+
+                part_row = cursor.execute(
+                    "SELECT name, sku, qty, min_qty, price, category_id FROM parts WHERE id = ?",
+                    (link["part_id"],),
+                ).fetchone()
+
+                if not part_row:
+                    return False, "Запчасть не найдена.", {}
+
+                cursor.execute(
+                    "UPDATE equipment_parts SET installed_qty = ? WHERE id = ?",
+                    (installed_qty, equipment_part_id),
+                )
+
+                name_changed = name != part_row["name"] or sku != part_row["sku"]
+                if name_changed:
+                    cursor.execute(
+                        "UPDATE parts SET name = ?, sku = ? WHERE id = ?",
+                        (name, sku, link["part_id"]),
+                    )
+                    cursor.execute(
+                        """
+                        UPDATE equipment
+                        SET name = ?, sku = ?
+                        WHERE id IN (
+                            SELECT cc.equipment_id
+                            FROM complex_components cc
+                            JOIN equipment_parts ep ON cc.equipment_part_id = ep.id
+                            WHERE ep.part_id = ?
+                        )
+                        """,
+                        (name, sku, link["part_id"]),
+                    )
+
+            self._log_action(
+                "Обновлена привязанная запчасть #{part_id} к оборудованию #{equipment_id}: "
+                "имя '{old_name}' → '{new_name}', артикул '{old_sku}' → '{new_sku}', "
+                "количество {old_qty} → {new_qty}".format(
+                    part_id=link["part_id"],
+                    equipment_id=link["equipment_id"],
+                    old_name=part_row["name"],
+                    new_name=name,
+                    old_sku=part_row["sku"],
+                    new_sku=sku,
+                    old_qty=link["installed_qty"],
+                    new_qty=installed_qty,
+                )
+            )
+
+            return True, "Данные привязанной запчасти обновлены.", {
+                "equipment_id": link["equipment_id"],
+                "part_id": link["part_id"],
+                "name_changed": name_changed,
+            }
+        except sqlite3.IntegrityError:
+            return False, "Запчасть с таким Наименованием и Артикулом уже существует.", {}
+        except sqlite3.Error as e:
+            logging.error(
+                "Ошибка при обновлении привязанной запчасти #%s: %s",
+                equipment_part_id,
+                e,
+                exc_info=True,
+            )
+            return False, f"Ошибка базы данных: {e}", {}
+
     def mark_equipment_part_as_complex(self, equipment_part_id: int):
         if not self.conn:
             return False, "Нет подключения к БД.", {}
