@@ -1579,15 +1579,15 @@ class Database:
                     ),
                 )
 
-                if new_sharp == "заточен":
-                    cursor.execute(
-                        "INSERT INTO knife_sharpen_log (part_id, date, comment) VALUES (?, ?, ?)",
-                        (
-                            part_id,
-                            today_str,
-                            "Автоматическая запись: кнопка 'Заточен'",
-                        ),
-                    )
+                action_text = "Заточен" if new_sharp == "заточен" else "Затуплен"
+                cursor.execute(
+                    "INSERT INTO knife_sharpen_log (part_id, date, comment) VALUES (?, ?, ?)",
+                    (
+                        part_id,
+                        today_str,
+                        f"[Ручное обновление] Состояние заточки: {action_text} (время: {timestamp})",
+                    ),
+                )
 
                 part_name = row["part_name"]
 
@@ -1680,6 +1680,16 @@ class Database:
                         new_install,
                         "Состояние установки изменено вручную",
                         timestamp,
+                    ),
+                )
+
+                install_text = "Установлен" if new_install == "установлен" else "Снят"
+                cursor.execute(
+                    "INSERT INTO knife_sharpen_log (part_id, date, comment) VALUES (?, ?, ?)",
+                    (
+                        part_id,
+                        today_str,
+                        f"[Ручное обновление] Состояние установки: {install_text} (время: {timestamp})",
                     ),
                 )
 
