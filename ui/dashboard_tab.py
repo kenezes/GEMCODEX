@@ -40,7 +40,15 @@ class DashboardTab(QWidget):
         self.tasks_table.customContextMenuRequested.connect(self.show_tasks_context_menu)
         tasks_layout.addWidget(self.tasks_table)
         tasks_group.setLayout(tasks_layout)
-        
+
+        periodic_group = QGroupBox("Периодические задачи (до выполнения ≤ 7 дней)")
+        periodic_layout = QVBoxLayout()
+        self.periodic_table = self._create_periodic_table()
+        periodic_layout.addWidget(self.periodic_table)
+        periodic_group.setLayout(periodic_layout)
+        periodic_group.setVisible(False)
+        self.periodic_group = periodic_group
+
         # Блок "Заказы в пути"
         orders_group = QGroupBox("Заказы в пути")
         orders_layout = QVBoxLayout()
@@ -52,6 +60,7 @@ class DashboardTab(QWidget):
 
         main_layout.addWidget(parts_group, 1)
         main_layout.addWidget(tasks_group, 1)
+        main_layout.addWidget(self.periodic_group, 1)
         main_layout.addWidget(orders_group, 1)
 
     def _create_parts_table(self):
@@ -87,14 +96,36 @@ class DashboardTab(QWidget):
         header.setStretchLastSection(False)
         return table
 
+    def _create_periodic_table(self):
+        table = QTableWidget()
+        table.setColumnCount(6)
+        table.setHorizontalHeaderLabels([
+            "Работа",
+            "Объект",
+            "Период (дн.)",
+            "Последняя дата",
+            "След. дата",
+            "Осталось",
+        ])
+        table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionMode(QAbstractItemView.NoSelection)
+        table.verticalHeader().setVisible(False)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setStretchLastSection(False)
+        return table
+
     def connect_events(self):
         self.event_bus.subscribe("parts.changed", self.refresh_parts_table)
         self.event_bus.subscribe("orders.changed", self.refresh_orders_table)
         self.event_bus.subscribe("tasks.changed", self.refresh_tasks_table)
+        self.event_bus.subscribe("periodic_tasks.changed", self.refresh_periodic_tasks_table)
 
     def refresh_all_tables(self):
         self.refresh_parts_table()
         self.refresh_tasks_table()
+        self.refresh_periodic_tasks_table()
         self.refresh_orders_table()
 
     def refresh_parts_table(self):
@@ -174,6 +205,71 @@ class DashboardTab(QWidget):
             self.orders_table.setItem(row, 3, QTableWidgetItem(db_string_to_ui_string(order.get('delivery_date'))))
             self.orders_table.setItem(row, 4, QTableWidgetItem(order['status']))
             self.orders_table.setItem(row, 5, QTableWidgetItem(order.get('comment', '')))
+
+    def refresh_periodic_tasks_table(self):
+        tasks = self.db.get_due_periodic_tasks()
+        self.periodic_group.setVisible(bool(tasks))
+        table = self.periodic_table
+        table.setRowCount(0)
+
+        for row, task in enumerate(tasks):
+            table.insertRow(row)
+
+            title = task.get('title') or ""
+            subject = self._format_periodic_subject(task)
+            period_days = str(task.get('period_days') or "")
+            last_date = db_string_to_ui_string(task.get('last_completed_date'))
+            next_due = db_string_to_ui_string(task.get('next_due_date'))
+            days_text = self._format_days_until_due(task.get('days_until_due'))
+
+            values = [title, subject, period_days, last_date, next_due, days_text]
+
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                item.setData(Qt.UserRole, task.get('id'))
+                table.setItem(row, col, item)
+
+            days_until = task.get('days_until_due')
+            color = None
+            if days_until is not None:
+                if days_until < 0:
+                    color = QColor("#ffcdd2")
+                elif days_until <= 3:
+                    color = QColor("#fff3cd")
+
+            if color:
+                for col in range(table.columnCount()):
+                    item = table.item(row, col)
+                    if item:
+                        item.setBackground(QBrush(color))
+
+        table.resizeColumnsToContents()
+
+    @staticmethod
+    def _format_periodic_subject(task: dict) -> str:
+        equipment_name = task.get('equipment_name') or ""
+        part_name = task.get('part_name')
+        part_sku = task.get('part_sku')
+
+        if part_name:
+            part_display = part_name
+            if part_sku:
+                part_display = f"{part_display} ({part_sku})"
+            if equipment_name:
+                return f"{equipment_name} → {part_display}"
+            return part_display
+
+        return equipment_name or "—"
+
+    @staticmethod
+    def _format_days_until_due(days_until_due):
+        if days_until_due is None:
+            return "—"
+        if days_until_due < 0:
+            return f"Просрочено на {abs(days_until_due)} дн."
+        if days_until_due == 0:
+            return "Сегодня"
+        return f"{days_until_due} дн."
 
     def order_selected_parts(self):
         selected_rows = sorted(list(set(item.row() for item in self.parts_table.selectedItems())))
