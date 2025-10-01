@@ -69,7 +69,8 @@ class OrdersTableModel(QAbstractTableModel):
 
     COUNTERPARTY_COLUMN = 0
     STATUS_COLUMN = 6
-    ACTION_COLUMN = 8
+    NOTIFIED_COLUMN = 8
+    ACTION_COLUMN = 9
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -82,6 +83,7 @@ class OrdersTableModel(QAbstractTableModel):
             "Адрес доставки",
             "Статус",
             "Комментарий",
+            "Уведомлён",
             "",
         ]
         self._data = []
@@ -110,8 +112,14 @@ class OrdersTableModel(QAbstractTableModel):
             if col == 6: return row_data['status']
             if col == 7: return row_data.get('comment', '')
             if col == 8: return ""
+            if col == 9: return ""
+
+        if role == Qt.CheckStateRole and col == self.NOTIFIED_COLUMN:
+            return Qt.Checked if row_data['id'] in self._notified_orders else Qt.Unchecked
 
         if role == Qt.TextAlignmentRole and col == self.ACTION_COLUMN:
+            return Qt.AlignCenter
+        if role == Qt.TextAlignmentRole and col == self.NOTIFIED_COLUMN:
             return Qt.AlignCenter
 
         if role == Qt.UserRole:
@@ -138,12 +146,37 @@ class OrdersTableModel(QAbstractTableModel):
             return Qt.ItemIsEnabled
         if index.column() == self.ACTION_COLUMN:
             return Qt.ItemIsEnabled
+        if index.column() == self.NOTIFIED_COLUMN:
+            return Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable
         return super().flags(index)
+
+    def setData(self, index: QModelIndex, value, role=Qt.EditRole):
+        if not index.isValid():
+            return False
+
+        if index.column() == self.NOTIFIED_COLUMN and role == Qt.CheckStateRole:
+            order_id = self._data[index.row()].get('id')
+            if order_id is None:
+                return False
+
+            if value == Qt.Checked:
+                if order_id not in self._notified_orders:
+                    self._notified_orders.add(order_id)
+            else:
+                self._notified_orders.discard(order_id)
+
+            self.dataChanged.emit(index, index, [Qt.CheckStateRole])
+            action_index = self.index(index.row(), self.ACTION_COLUMN)
+            self.dataChanged.emit(action_index, action_index, [Qt.DisplayRole, Qt.UserRole + 2])
+            return True
+
+        return super().setData(index, value, role)
 
     def load_data(self, data):
         self.beginResetModel()
         self._data = data
-        self._notified_orders.clear()
+        current_ids = {row.get('id') for row in data if row.get('id') is not None}
+        self._notified_orders.intersection_update(current_ids)
         self.endResetModel()
 
     def get_row(self, row_index: int) -> dict | None:
@@ -157,8 +190,10 @@ class OrdersTableModel(QAbstractTableModel):
         for row_index, row in enumerate(self._data):
             if row.get('id') == order_id:
                 self._notified_orders.add(order_id)
-                model_index = self.index(row_index, self.ACTION_COLUMN)
-                self.dataChanged.emit(model_index, model_index, [Qt.DisplayRole, Qt.UserRole + 2])
+                action_index = self.index(row_index, self.ACTION_COLUMN)
+                notified_index = self.index(row_index, self.NOTIFIED_COLUMN)
+                self.dataChanged.emit(notified_index, notified_index, [Qt.CheckStateRole])
+                self.dataChanged.emit(action_index, action_index, [Qt.DisplayRole, Qt.UserRole + 2])
                 break
 
 class OrdersFilterProxyModel(QSortFilterProxyModel):
@@ -282,6 +317,7 @@ class OrdersTab(QWidget):
         self.action_delegate = ActionButtonDelegate(self.table_view)
         self.action_delegate.clicked.connect(self._handle_action_button)
         self.table_view.setItemDelegateForColumn(OrdersTableModel.ACTION_COLUMN, self.action_delegate)
+        self.table_view.setColumnWidth(OrdersTableModel.NOTIFIED_COLUMN, 110)
         self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 72)
 
     def refresh_data(self):
@@ -292,6 +328,10 @@ class OrdersTab(QWidget):
         current_width = self.table_view.columnWidth(OrdersTableModel.ACTION_COLUMN)
         if current_width < 72:
             self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 72)
+        self.table_view.resizeColumnToContents(OrdersTableModel.NOTIFIED_COLUMN)
+        notified_width = self.table_view.columnWidth(OrdersTableModel.NOTIFIED_COLUMN)
+        if notified_width < 100:
+            self.table_view.setColumnWidth(OrdersTableModel.NOTIFIED_COLUMN, 100)
 
     def toggle_hide_completed(self, state):
         self.proxy_model.set_hide_completed(state == Qt.Checked)
