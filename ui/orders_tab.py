@@ -3,28 +3,51 @@ from urllib.parse import quote
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QToolBar, QTableView, QAbstractItemView,
                              QHeaderView, QMessageBox, QCheckBox, QHBoxLayout, QMenu, QPushButton, QSizePolicy,
                              QLabel, QLineEdit, QStyledItemDelegate, QStyleOptionButton, QStyle)
-from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, Signal, QEvent, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication, QColor, QPalette
+from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, Signal, QEvent, QUrl, QSize
+from PySide6.QtGui import (QAction, QDesktopServices, QGuiApplication, QColor, QPalette,
+                         QFont, QPixmap, QPainter, QIcon)
 
 from .order_dialog import OrderDialog
 from ui.utils import db_string_to_ui_string, apply_table_compact_style
 
 
 class ActionButtonDelegate(QStyledItemDelegate):
-    """Рисует кнопку "Сообщить" и обрабатывает клики по ней."""
+    """Рисует кнопку с иконкой телефона и обрабатывает клики по ней."""
+
+    PHONE_ICON_SIZE = QSize(18, 18)
 
     clicked = Signal(QModelIndex)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._phone_icon = self._create_phone_icon()
+
+    @staticmethod
+    def _create_phone_icon() -> QIcon:
+        pixmap = QPixmap(36, 36)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        font = QFont()
+        font.setPointSize(20)
+        painter.setFont(font)
+        painter.setPen(Qt.white)
+        painter.drawText(pixmap.rect(), Qt.AlignCenter, "📞")
+        painter.end()
+        return QIcon(pixmap)
 
     def paint(self, painter, option, index):  # type: ignore[override]
         button_option = QStyleOptionButton()
         button_option.rect = option.rect.adjusted(4, 6, -4, -6)
-        button_option.text = "Сообщить"
+        button_option.text = ""
         button_option.state = QStyle.State_Enabled
         palette = QPalette(option.palette)
         is_notified = bool(index.data(Qt.UserRole + 2))
         palette.setColor(QPalette.Button, QColor("#2e7d32") if is_notified else QColor("#c62828"))
         palette.setColor(QPalette.ButtonText, Qt.white)
         button_option.palette = palette
+        button_option.icon = self._phone_icon
+        button_option.iconSize = self.PHONE_ICON_SIZE
         if option.state & QStyle.State_MouseOver:
             button_option.state |= QStyle.State_MouseOver
         option.widget.style().drawControl(QStyle.CE_PushButton, button_option, painter, option.widget)
@@ -86,7 +109,7 @@ class OrdersTableModel(QAbstractTableModel):
             if col == 5: return row_data.get('delivery_address') or row_data.get('counterparty_address', '')
             if col == 6: return row_data['status']
             if col == 7: return row_data.get('comment', '')
-            if col == 8: return "Сообщить"
+            if col == 8: return ""
 
         if role == Qt.TextAlignmentRole and col == self.ACTION_COLUMN:
             return Qt.AlignCenter
@@ -99,6 +122,9 @@ class OrdersTableModel(QAbstractTableModel):
 
         if role == Qt.UserRole + 2 and index.column() == self.ACTION_COLUMN:
             return row_data['id'] in self._notified_orders
+
+        if role == Qt.ToolTipRole and col == self.ACTION_COLUMN:
+            return "Сообщить водителю о поставке"
 
         return None
 
@@ -132,7 +158,7 @@ class OrdersTableModel(QAbstractTableModel):
             if row.get('id') == order_id:
                 self._notified_orders.add(order_id)
                 model_index = self.index(row_index, self.ACTION_COLUMN)
-                self.dataChanged.emit(model_index, model_index, [Qt.DisplayRole])
+                self.dataChanged.emit(model_index, model_index, [Qt.DisplayRole, Qt.UserRole + 2])
                 break
 
 class OrdersFilterProxyModel(QSortFilterProxyModel):
@@ -256,7 +282,7 @@ class OrdersTab(QWidget):
         self.action_delegate = ActionButtonDelegate(self.table_view)
         self.action_delegate.clicked.connect(self._handle_action_button)
         self.table_view.setItemDelegateForColumn(OrdersTableModel.ACTION_COLUMN, self.action_delegate)
-        self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 120)
+        self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 72)
 
     def refresh_data(self):
         logging.info("Обновление данных на вкладке 'Заказы'")
@@ -264,8 +290,8 @@ class OrdersTab(QWidget):
         self.base_model.load_data(orders_data)
         self.table_view.resizeColumnToContents(OrdersTableModel.ACTION_COLUMN)
         current_width = self.table_view.columnWidth(OrdersTableModel.ACTION_COLUMN)
-        if current_width < 120:
-            self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 120)
+        if current_width < 72:
+            self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 72)
 
     def toggle_hide_completed(self, state):
         self.proxy_model.set_hide_completed(state == Qt.Checked)

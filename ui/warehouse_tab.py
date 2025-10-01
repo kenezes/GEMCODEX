@@ -1,10 +1,11 @@
 import logging
+from typing import Optional
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableView,
                              QPushButton, QLineEdit, QComboBox, QAbstractItemView,
                              QHeaderView, QMessageBox, QMenu, QStyledItemDelegate, QStyleOptionButton, QStyle)
 from PySide6.QtCore import (Qt, QAbstractTableModel, QModelIndex,
-                          QSortFilterProxyModel, Signal, QEvent)
-from PySide6.QtGui import QAction
+                          QSortFilterProxyModel, Signal, QEvent, QSize)
+from PySide6.QtGui import QAction, QIcon
 
 from .part_dialog import PartDialog
 from .category_manager_dialog import CategoryManagerDialog
@@ -12,15 +13,24 @@ from .utils import apply_table_compact_style, open_part_folder
 
 
 class FolderButtonDelegate(QStyledItemDelegate):
-    """Рисует кнопку "Папка" и обрабатывает клики по ней."""
+    """Рисует кнопку с иконкой папки и обрабатывает клики по ней."""
 
     clicked = Signal(QModelIndex)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._icon: Optional[QIcon] = None
+        if parent:
+            self._icon = parent.style().standardIcon(QStyle.SP_DirIcon)
 
     def paint(self, painter, option, index):  # type: ignore[override]
         button_option = QStyleOptionButton()
         button_option.rect = option.rect.adjusted(4, 6, -4, -6)
-        button_option.text = "Папка"
+        button_option.text = ""
         button_option.state = QStyle.State_Enabled
+        icon = self._icon or option.widget.style().standardIcon(QStyle.SP_DirIcon)
+        button_option.icon = icon
+        button_option.iconSize = QSize(16, 16)
         if option.state & QStyle.State_MouseOver:
             button_option.state |= QStyle.State_MouseOver
         option.widget.style().drawControl(QStyle.CE_PushButton, button_option, painter, option.widget)
@@ -239,7 +249,7 @@ class TableModel(QAbstractTableModel):
             if col == 4: return f"{row_data.get('price', 0):.2f}"
             if col == 5: return row_data.get('category_name')
             if col == 6: return row_data.get('equipment_list', 'нет')
-            if col == self.FOLDER_COLUMN: return "Папка"
+            if col == self.FOLDER_COLUMN: return ""
 
         if role == Qt.UserRole:
             return row_data.get('id')
@@ -252,6 +262,9 @@ class TableModel(QAbstractTableModel):
                 return Qt.AlignCenter
             if col == self.FOLDER_COLUMN:
                 return Qt.AlignCenter
+
+        if role == Qt.ToolTipRole and col == self.FOLDER_COLUMN:
+            return "Открыть папку запчасти"
 
         return None
 

@@ -19,6 +19,23 @@ from ui.utils import db_string_to_ui_string, apply_table_compact_style
 from .knife_sharpen_history_dialog import KnifeSharpenHistoryDialog
 
 
+def _sharpening_button_style(base_color: str, hover_color: str, pressed_color: str) -> str:
+    return (
+        "QPushButton {"
+        f"background-color: {base_color};"
+        "color: white;"
+        "border: none;"
+        "border-radius: 4px;"
+        "padding: 2px 8px;"
+        "font-size: 11px;"
+        "min-height: 0;"
+        "min-width: 0;"
+        "}"
+        f"QPushButton:hover {{background-color: {hover_color};}}"
+        f"QPushButton:pressed {{background-color: {pressed_color};}}"
+    )
+
+
 class SharpeningTableModel(QAbstractTableModel):
     ACTION_COLUMN = 6
 
@@ -98,28 +115,8 @@ class SharpeningTableModel(QAbstractTableModel):
 
 
 class SharpeningActionsWidget(QWidget):
-    GREEN_STYLE = (
-        "QPushButton {"
-        "background-color: #2e7d32;"
-        "color: white;"
-        "border: none;"
-        "border-radius: 4px;"
-        "padding: 4px 10px;"
-        "}"
-        "QPushButton:hover {background-color: #1b5e20;}"
-        "QPushButton:pressed {background-color: #134d16;}"
-    )
-    RED_STYLE = (
-        "QPushButton {"
-        "background-color: #c62828;"
-        "color: white;"
-        "border: none;"
-        "border-radius: 4px;"
-        "padding: 4px 10px;"
-        "}"
-        "QPushButton:hover {background-color: #b71c1c;}"
-        "QPushButton:pressed {background-color: #8e0000;}"
-    )
+    GREEN_STYLE = _sharpening_button_style("#2e7d32", "#1b5e20", "#134d16")
+    RED_STYLE = _sharpening_button_style("#c62828", "#b71c1c", "#8e0000")
 
     def __init__(self, db, event_bus, part_id: int, sharp_state: str, installation_state: str, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -130,14 +127,16 @@ class SharpeningActionsWidget(QWidget):
         self.installation_state = installation_state or "снят"
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(0, 2, 0, 2)
         layout.setSpacing(6)
 
         self.sharp_button = QPushButton(self)
         self.install_button = QPushButton(self)
         for button in (self.sharp_button, self.install_button):
             button.setCursor(Qt.PointingHandCursor)
-            button.setMinimumHeight(28)
+            button.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+            button.setMinimumWidth(0)
+            button.setFixedHeight(24)
             layout.addWidget(button)
 
         self.sharp_button.clicked.connect(self.toggle_sharp_state)
