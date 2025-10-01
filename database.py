@@ -986,6 +986,61 @@ class Database:
             ORDER BY o.created_at DESC
         """
         return self.fetchall(query)
+
+    def get_completed_orders_history(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        counterparty_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Возвращает историю выполненных заказов с учётом фильтров."""
+
+        base_query = """
+            SELECT
+                o.id,
+                c.name AS counterparty_name,
+                o.invoice_no,
+                o.invoice_date,
+                o.delivery_date,
+                o.created_at,
+                o.delivery_address,
+                o.status,
+                o.comment,
+                c.address AS counterparty_address
+            FROM orders o
+            JOIN counterparties c ON o.counterparty_id = c.id
+            WHERE o.status = 'принят'
+        """
+
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if start_date:
+            conditions.append(
+                "COALESCE(o.delivery_date, o.invoice_date, substr(o.created_at, 1, 10)) >= ?"
+            )
+            params.append(start_date)
+
+        if end_date:
+            conditions.append(
+                "COALESCE(o.delivery_date, o.invoice_date, substr(o.created_at, 1, 10)) <= ?"
+            )
+            params.append(end_date)
+
+        if counterparty_id:
+            conditions.append("o.counterparty_id = ?")
+            params.append(counterparty_id)
+
+        if conditions:
+            base_query += " AND " + " AND ".join(conditions)
+
+        base_query += (
+            " ORDER BY "
+            "COALESCE(o.delivery_date, o.invoice_date, substr(o.created_at, 1, 10)) DESC, "
+            "o.id DESC"
+        )
+
+        return self.fetchall(base_query, tuple(params))
     def get_order_details(self, order_id): return self.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
     def get_order_items(self, order_id): return self.fetchall("SELECT * FROM order_items WHERE order_id = ?", (order_id,))
     def create_order_with_items(self, order_data, items_data):
@@ -1795,11 +1850,72 @@ class Database:
             FROM tasks t
             LEFT JOIN colleagues c ON t.assignee_id = c.id
             LEFT JOIN equipment e ON t.equipment_id = e.id
-            ORDER BY 
-                CASE t.priority WHEN 'высокий' THEN 1 WHEN 'средний' THEN 2 WHEN 'низкий' THEN 3 ELSE 4 END, 
+            ORDER BY
+                CASE t.priority WHEN 'высокий' THEN 1 WHEN 'средний' THEN 2 WHEN 'низкий' THEN 3 ELSE 4 END,
                 t.due_date
         """
         return self.fetchall(query)
+
+    def get_tasks_history(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        assignee_id: int | None = None,
+        equipment_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Возвращает задачи со статусом 'выполнена' или 'отменена'."""
+
+        query = """
+            SELECT
+                t.id,
+                t.title,
+                t.description,
+                t.priority,
+                t.due_date,
+                t.status,
+                t.created_at,
+                t.assignee_id,
+                t.equipment_id,
+                c.name AS assignee_name,
+                e.name AS equipment_name
+            FROM tasks t
+            LEFT JOIN colleagues c ON t.assignee_id = c.id
+            LEFT JOIN equipment e ON t.equipment_id = e.id
+            WHERE t.status IN ('выполнена', 'отменена')
+        """
+
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if start_date:
+            conditions.append(
+                "COALESCE(t.due_date, substr(t.created_at, 1, 10)) >= ?"
+            )
+            params.append(start_date)
+
+        if end_date:
+            conditions.append(
+                "COALESCE(t.due_date, substr(t.created_at, 1, 10)) <= ?"
+            )
+            params.append(end_date)
+
+        if assignee_id:
+            conditions.append("t.assignee_id = ?")
+            params.append(assignee_id)
+
+        if equipment_id:
+            conditions.append("t.equipment_id = ?")
+            params.append(equipment_id)
+
+        if conditions:
+            query += " AND " + " AND ".join(conditions)
+
+        query += (
+            " ORDER BY COALESCE(t.due_date, substr(t.created_at, 1, 10)) DESC, "
+            "t.created_at DESC, t.id DESC"
+        )
+
+        return self.fetchall(query, tuple(params))
     def get_task_by_id(self, task_id): return self.fetchone("SELECT * FROM tasks WHERE id = ?", (task_id,))
     def add_task(
         self,
@@ -2668,6 +2784,75 @@ class Database:
             ORDER BY l.date DESC, l.id DESC
         """
         return self.fetchall(query)
+
+    def get_knife_operations_history(
+        self,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        part_id: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Возвращает объединённую историю операций с ножами."""
+
+        query = """
+            SELECT *
+            FROM (
+                SELECT
+                    'sharpen' AS entry_type,
+                    l.id AS entry_id,
+                    l.part_id AS part_id,
+                    l.date AS event_date,
+                    NULL AS event_time,
+                    l.comment AS comment,
+                    NULL AS from_status,
+                    NULL AS to_status,
+                    p.name AS part_name,
+                    p.sku AS part_sku
+                FROM knife_sharpen_log l
+                JOIN parts p ON l.part_id = p.id
+
+                UNION ALL
+
+                SELECT
+                    'status' AS entry_type,
+                    s.id AS entry_id,
+                    s.part_id AS part_id,
+                    substr(s.changed_at, 1, 10) AS event_date,
+                    substr(s.changed_at, 12, 8) AS event_time,
+                    s.comment AS comment,
+                    s.from_status AS from_status,
+                    s.to_status AS to_status,
+                    p.name AS part_name,
+                    p.sku AS part_sku
+                FROM knife_status_log s
+                JOIN parts p ON s.part_id = p.id
+            ) AS history
+        """
+
+        conditions: list[str] = []
+        params: list[Any] = []
+
+        if start_date:
+            conditions.append("history.event_date >= ?")
+            params.append(start_date)
+
+        if end_date:
+            conditions.append("history.event_date <= ?")
+            params.append(end_date)
+
+        if part_id:
+            conditions.append("history.part_id = ?")
+            params.append(part_id)
+
+        if conditions:
+            query += " WHERE " + " AND ".join(conditions)
+
+        query += (
+            " ORDER BY history.event_date DESC, "
+            "COALESCE(history.event_time, '00:00:00') DESC, "
+            "history.entry_id DESC"
+        )
+
+        return self.fetchall(query, tuple(params))
 
     def delete_knife_sharpen_entry(self, entry_id):
         if not self.conn:
