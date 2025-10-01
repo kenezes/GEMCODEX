@@ -111,8 +111,6 @@ class CounterpartyDialog(QDialog):
     def _update_address_item_text(self, item: QListWidgetItem):
         data = item.data(Qt.UserRole) or {}
         text = data.get('address', '')
-        if data.get('is_default'):
-            text = f"{text} (по умолчанию)"
         item.setText(text)
 
     def _update_address_buttons_state(self):

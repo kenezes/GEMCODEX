@@ -75,6 +75,11 @@ class EquipmentTab(QWidget):
 
         left_layout.addLayout(tree_buttons_layout)
 
+        self.add_equipment_main_button = QPushButton("Добавить оборудование")
+        self.add_equipment_main_button.setCursor(Qt.PointingHandCursor)
+        self.add_equipment_main_button.clicked.connect(self.add_equipment)
+        left_layout.addWidget(self.add_equipment_main_button)
+
         self.only_requires_equipment_checkbox = QCheckBox("Только оборудование с требующей замену запчастью")
         self.only_requires_equipment_checkbox.setToolTip(
             "Отображать только те аппараты, у которых есть помеченные как требующие замены запчасти."

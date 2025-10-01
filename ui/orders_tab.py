@@ -2,75 +2,20 @@ import logging
 from urllib.parse import quote
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QToolBar, QTableView, QAbstractItemView,
                              QHeaderView, QMessageBox, QCheckBox, QHBoxLayout, QMenu, QPushButton, QSizePolicy,
-                             QLabel, QLineEdit, QStyledItemDelegate, QStyleOptionButton, QStyle)
-from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, Signal, QEvent, QUrl, QSize
-from PySide6.QtGui import (QAction, QDesktopServices, QGuiApplication, QColor, QPalette,
-                         QFont, QPixmap, QPainter, QIcon)
+                             QLabel, QLineEdit)
+from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
 
 from .order_dialog import OrderDialog
 from ui.utils import db_string_to_ui_string, apply_table_compact_style
 
-
-class ActionButtonDelegate(QStyledItemDelegate):
-    """Рисует кнопку с иконкой телефона и обрабатывает клики по ней."""
-
-    PHONE_ICON_SIZE = QSize(18, 18)
-
-    clicked = Signal(QModelIndex)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._phone_icon = self._create_phone_icon()
-
-    @staticmethod
-    def _create_phone_icon() -> QIcon:
-        pixmap = QPixmap(36, 36)
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        painter.setRenderHint(QPainter.Antialiasing)
-        font = QFont()
-        font.setPointSize(20)
-        painter.setFont(font)
-        painter.setPen(Qt.white)
-        painter.drawText(pixmap.rect(), Qt.AlignCenter, "📞")
-        painter.end()
-        return QIcon(pixmap)
-
-    def paint(self, painter, option, index):  # type: ignore[override]
-        button_option = QStyleOptionButton()
-        button_option.rect = option.rect.adjusted(4, 6, -4, -6)
-        button_option.text = ""
-        button_option.state = QStyle.State_Enabled
-        palette = QPalette(option.palette)
-        is_notified = bool(index.data(Qt.UserRole + 2))
-        palette.setColor(QPalette.Button, QColor("#2e7d32") if is_notified else QColor("#c62828"))
-        palette.setColor(QPalette.ButtonText, Qt.white)
-        button_option.palette = palette
-        button_option.icon = self._phone_icon
-        button_option.iconSize = self.PHONE_ICON_SIZE
-        if option.state & QStyle.State_MouseOver:
-            button_option.state |= QStyle.State_MouseOver
-        option.widget.style().drawControl(QStyle.CE_PushButton, button_option, painter, option.widget)
-
-    def editorEvent(self, event, model, option, index):  # type: ignore[override]
-        if event.type() == QEvent.MouseButtonPress and option.rect.contains(event.pos()):
-            if hasattr(event, 'button') and event.button() != Qt.LeftButton:
-                return False
-            return True
-        if event.type() == QEvent.MouseButtonRelease and option.rect.contains(event.pos()):
-            if hasattr(event, 'button') and event.button() != Qt.LeftButton:
-                return False
-            self.clicked.emit(index)
-            return True
-        return False
 
 class OrdersTableModel(QAbstractTableModel):
     """Модель данных для таблицы заказов."""
 
     COUNTERPARTY_COLUMN = 0
     STATUS_COLUMN = 6
-    NOTIFIED_COLUMN = 8
-    ACTION_COLUMN = 9
+    ACTION_COLUMN = 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -83,7 +28,6 @@ class OrdersTableModel(QAbstractTableModel):
             "Адрес доставки",
             "Статус",
             "Комментарий",
-            "Уведомлён",
             "",
         ]
         self._data = []
@@ -111,15 +55,8 @@ class OrdersTableModel(QAbstractTableModel):
             if col == 5: return row_data.get('delivery_address') or row_data.get('counterparty_address', '')
             if col == 6: return row_data['status']
             if col == 7: return row_data.get('comment', '')
-            if col == 8: return ""
-            if col == 9: return ""
-
-        if role == Qt.CheckStateRole and col == self.NOTIFIED_COLUMN:
-            return Qt.Checked if row_data['id'] in self._notified_orders else Qt.Unchecked
 
         if role == Qt.TextAlignmentRole and col == self.ACTION_COLUMN:
-            return Qt.AlignCenter
-        if role == Qt.TextAlignmentRole and col == self.NOTIFIED_COLUMN:
             return Qt.AlignCenter
 
         if role == Qt.UserRole:
@@ -127,12 +64,6 @@ class OrdersTableModel(QAbstractTableModel):
 
         if role == Qt.UserRole + 1:
             return row_data
-
-        if role == Qt.UserRole + 2 and index.column() == self.ACTION_COLUMN:
-            return row_data['id'] in self._notified_orders
-
-        if role == Qt.ToolTipRole and col == self.ACTION_COLUMN:
-            return "Сообщить водителю о поставке"
 
         return None
 
@@ -146,31 +77,7 @@ class OrdersTableModel(QAbstractTableModel):
             return Qt.ItemIsEnabled
         if index.column() == self.ACTION_COLUMN:
             return Qt.ItemIsEnabled
-        if index.column() == self.NOTIFIED_COLUMN:
-            return Qt.ItemIsEnabled | Qt.ItemIsUserCheckable | Qt.ItemIsSelectable
         return super().flags(index)
-
-    def setData(self, index: QModelIndex, value, role=Qt.EditRole):
-        if not index.isValid():
-            return False
-
-        if index.column() == self.NOTIFIED_COLUMN and role == Qt.CheckStateRole:
-            order_id = self._data[index.row()].get('id')
-            if order_id is None:
-                return False
-
-            if value == Qt.Checked:
-                if order_id not in self._notified_orders:
-                    self._notified_orders.add(order_id)
-            else:
-                self._notified_orders.discard(order_id)
-
-            self.dataChanged.emit(index, index, [Qt.CheckStateRole])
-            action_index = self.index(index.row(), self.ACTION_COLUMN)
-            self.dataChanged.emit(action_index, action_index, [Qt.DisplayRole, Qt.UserRole + 2])
-            return True
-
-        return super().setData(index, value, role)
 
     def load_data(self, data):
         self.beginResetModel()
@@ -184,17 +91,16 @@ class OrdersTableModel(QAbstractTableModel):
             return self._data[row_index]
         return None
 
-    def mark_notified(self, order_id: int):
-        if order_id in self._notified_orders:
+    def set_notified(self, order_id: int, notified: bool):
+        if order_id is None:
             return
-        for row_index, row in enumerate(self._data):
-            if row.get('id') == order_id:
-                self._notified_orders.add(order_id)
-                action_index = self.index(row_index, self.ACTION_COLUMN)
-                notified_index = self.index(row_index, self.NOTIFIED_COLUMN)
-                self.dataChanged.emit(notified_index, notified_index, [Qt.CheckStateRole])
-                self.dataChanged.emit(action_index, action_index, [Qt.DisplayRole, Qt.UserRole + 2])
-                break
+        if notified:
+            self._notified_orders.add(order_id)
+        else:
+            self._notified_orders.discard(order_id)
+
+    def is_notified(self, order_id: int) -> bool:
+        return order_id in self._notified_orders
 
 class OrdersFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
@@ -220,7 +126,8 @@ class OrdersTab(QWidget):
         self.db = db
         self.event_bus = event_bus
         self.main_window = main_window
-        
+        self._action_widgets: dict[int, QWidget] = {}
+
         self.init_ui()
         self.event_bus.subscribe("orders.changed", self.refresh_data)
         self.event_bus.subscribe("counterparties.changed", self.refresh_data) # На случай переименования
@@ -240,18 +147,13 @@ class OrdersTab(QWidget):
         self.toolbar = QToolBar()
         
         self.new_order_button = QPushButton("Новый заказ")
-        self.edit_order_button = QPushButton("Редактировать")
-        self.delete_order_button = QPushButton("Удалить") # Новая кнопка
-        self.accept_delivery_button = QPushButton("Принять поставку")
+        self.delete_order_button = QPushButton("Удалить")
         self.refresh_button = QPushButton("Обновить")
         
         self.hide_completed_checkbox = QCheckBox("Скрыть завершенные")
         
         self.toolbar.addWidget(self.new_order_button)
-        self.toolbar.addWidget(self.edit_order_button)
-        self.toolbar.addWidget(self.delete_order_button) # Добавляем кнопку
-        self.toolbar.addSeparator()
-        self.toolbar.addWidget(self.accept_delivery_button)
+        self.toolbar.addWidget(self.delete_order_button)
         self.toolbar.addSeparator()
 
         driver_layout = QHBoxLayout()
@@ -287,9 +189,7 @@ class OrdersTab(QWidget):
         self.toolbar.addWidget(self.refresh_button)
 
         self.new_order_button.clicked.connect(self.create_new_order)
-        self.edit_order_button.clicked.connect(self.edit_selected_order)
-        self.delete_order_button.clicked.connect(self.delete_selected_order) # Подключаем сигнал
-        self.accept_delivery_button.clicked.connect(self.accept_delivery_for_selected)
+        self.delete_order_button.clicked.connect(self.delete_selected_order)
         self.refresh_button.clicked.connect(self.refresh_data)
         self.hide_completed_checkbox.stateChanged.connect(self.toggle_hide_completed)
 
@@ -313,25 +213,16 @@ class OrdersTab(QWidget):
         header.setStretchLastSection(False)
 
         apply_table_compact_style(self.table_view)
+        self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 260)
 
-        self.action_delegate = ActionButtonDelegate(self.table_view)
-        self.action_delegate.clicked.connect(self._handle_action_button)
-        self.table_view.setItemDelegateForColumn(OrdersTableModel.ACTION_COLUMN, self.action_delegate)
-        self.table_view.setColumnWidth(OrdersTableModel.NOTIFIED_COLUMN, 110)
-        self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 72)
+        self.proxy_model.layoutChanged.connect(self._populate_action_widgets)
+        self.proxy_model.modelReset.connect(self._populate_action_widgets)
 
     def refresh_data(self):
         logging.info("Обновление данных на вкладке 'Заказы'")
         orders_data = self.db.get_all_orders_with_counterparty()
         self.base_model.load_data(orders_data)
-        self.table_view.resizeColumnToContents(OrdersTableModel.ACTION_COLUMN)
-        current_width = self.table_view.columnWidth(OrdersTableModel.ACTION_COLUMN)
-        if current_width < 72:
-            self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 72)
-        self.table_view.resizeColumnToContents(OrdersTableModel.NOTIFIED_COLUMN)
-        notified_width = self.table_view.columnWidth(OrdersTableModel.NOTIFIED_COLUMN)
-        if notified_width < 100:
-            self.table_view.setColumnWidth(OrdersTableModel.NOTIFIED_COLUMN, 100)
+        self._populate_action_widgets()
 
     def toggle_hide_completed(self, state):
         self.proxy_model.set_hide_completed(state == Qt.Checked)
@@ -378,17 +269,7 @@ class OrdersTab(QWidget):
     def accept_delivery_for_selected(self):
         order_id = self.get_selected_order_id()
         if order_id:
-            reply = QMessageBox.question(self, "Подтверждение",
-                                       "Принять поставку по этому заказу? Остатки на складе будут увеличены.",
-                                       QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-            if reply == QMessageBox.Yes:
-                success, message = self.db.accept_delivery(order_id)
-                if success:
-                    QMessageBox.information(self, "Успех", message)
-                    self.event_bus.emit("orders.changed")
-                    self.event_bus.emit("parts.changed")
-                else:
-                    QMessageBox.warning(self, "Внимание", message)
+            self._accept_order(order_id)
         else:
             QMessageBox.information(self, "Информация", "Выберите заказ для приемки.")
 
@@ -409,12 +290,170 @@ class OrdersTab(QWidget):
 
         menu.exec(self.table_view.viewport().mapToGlobal(position))
 
-    def _handle_action_button(self, proxy_index: QModelIndex):
-        source_index = self.proxy_model.mapToSource(proxy_index)
-        row_data = self.base_model.get_row(source_index.row())
-        if not row_data:
+    def _populate_action_widgets(self):
+        for widget in self._action_widgets.values():
+            if widget:
+                widget.deleteLater()
+        self._action_widgets.clear()
+
+        for row in range(self.proxy_model.rowCount()):
+            proxy_index = self.proxy_model.index(row, OrdersTableModel.ACTION_COLUMN)
+            if not proxy_index.isValid():
+                continue
+            source_index = self.proxy_model.mapToSource(proxy_index)
+            order = self.base_model.get_row(source_index.row())
+            if not order:
+                continue
+
+            widget = self._create_order_actions_widget(order)
+            self.table_view.setIndexWidget(proxy_index, widget)
+            order_id = order.get('id')
+            if order_id is not None:
+                self._action_widgets[order_id] = widget
+
+    def _create_order_actions_widget(self, order: dict) -> QWidget:
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        order_id = order.get('id')
+
+        accept_button = self._create_action_button("Принять", "#2e7d32")
+        accept_button.setToolTip("Принять поставку")
+        if order_id is not None:
+            accept_button.clicked.connect(lambda _, oid=order_id: self._accept_order(oid))
+        else:
+            accept_button.setEnabled(False)
+        layout.addWidget(accept_button)
+
+        invoice_button = self._create_action_button("Счёт")
+        invoice_button.setToolTip("Отметить заказ как отправленный")
+        self._update_invoice_button_style(invoice_button, order.get('status'))
+        if order_id is not None:
+            invoice_button.clicked.connect(
+                lambda _, oid=order_id, btn=invoice_button: self._mark_order_in_transit(oid, btn)
+            )
+        else:
+            invoice_button.setEnabled(False)
+        layout.addWidget(invoice_button)
+
+        notify_checkbox = QCheckBox()
+        notify_checkbox.setToolTip("Водитель уведомлён")
+        if order_id is not None:
+            notify_checkbox.setChecked(self.base_model.is_notified(order_id))
+            notify_checkbox.stateChanged.connect(
+                lambda state, oid=order_id: self._set_order_notified(oid, state == Qt.Checked)
+            )
+        else:
+            notify_checkbox.setEnabled(False)
+        layout.addWidget(notify_checkbox)
+
+        phone_button = self._create_action_button("📞", "#0277bd")
+        phone_button.setToolTip("Отправить данные водителю")
+        if order_id is not None:
+            phone_button.clicked.connect(
+                lambda _, data=order, chk=notify_checkbox: self._send_order_to_driver(data, chk)
+            )
+        else:
+            phone_button.setEnabled(False)
+        layout.addWidget(phone_button)
+
+        layout.addStretch()
+        return widget
+
+    @staticmethod
+    def _create_action_button(text: str, background: str | None = None) -> QPushButton:
+        button = QPushButton(text)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setFixedHeight(26)
+        styles = [
+            "QPushButton {",
+            "padding: 4px 8px;",
+            "border-radius: 4px;",
+            "font-size: 12px;",
+        ]
+        if background:
+            styles.append(f"background-color: {background};")
+            styles.append("color: #ffffff;")
+            styles.append("border: none;")
+        else:
+            styles.append("background-color: #e0e0e0;")
+            styles.append("color: #000000;")
+            styles.append("border: 1px solid #bdbdbd;")
+        styles.append("}\n")
+        styles.append("QPushButton:disabled { background-color: #f0f0f0; color: #9e9e9e; }")
+        button.setStyleSheet("".join(styles))
+        return button
+
+    @staticmethod
+    def _update_invoice_button_style(button: QPushButton, status: str | None):
+        if status in {"в пути", "принят"}:
+            button.setStyleSheet(
+                """
+                QPushButton {
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                    font-size: 12px;
+                    background-color: #2e7d32;
+                    color: #ffffff;
+                    border: none;
+                }
+                QPushButton:disabled {
+                    background-color: #a5d6a7;
+                    color: #f5f5f5;
+                }
+                """
+            )
+        else:
+            button.setStyleSheet(
+                """
+                QPushButton {
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                    font-size: 12px;
+                    background-color: #c62828;
+                    color: #ffffff;
+                    border: none;
+                }
+                QPushButton:disabled {
+                    background-color: #ef9a9a;
+                    color: #fbe9e7;
+                }
+                """
+            )
+
+    def _set_order_notified(self, order_id: int, notified: bool):
+        self.base_model.set_notified(order_id, notified)
+
+    def _mark_order_in_transit(self, order_id: int, button: QPushButton):
+        success, message = self.db.update_order_status(order_id, 'в пути')
+        if success:
+            self.event_bus.emit("orders.changed")
+            self._update_invoice_button_style(button, 'в пути')
+        else:
+            QMessageBox.warning(self, "Статус заказа", message)
+
+    def _accept_order(self, order_id: int):
+        reply = QMessageBox.question(
+            self,
+            "Подтверждение",
+            "Принять поставку по этому заказу? Остатки на складе будут увеличены.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply == QMessageBox.No:
             return
 
+        success, message = self.db.accept_delivery(order_id)
+        if success:
+            QMessageBox.information(self, "Поставка", message)
+            self.event_bus.emit("orders.changed")
+            self.event_bus.emit("parts.changed")
+        else:
+            QMessageBox.warning(self, "Поставка", message)
+
+    def _send_order_to_driver(self, order: dict, checkbox: QCheckBox):
         driver_number_raw = self.driver_phone_input.text().strip()
         digits_only = ''.join(ch for ch in driver_number_raw if ch.isdigit())
         if not digits_only:
@@ -422,27 +461,34 @@ class OrdersTab(QWidget):
             return
         if len(digits_only) == 11 and digits_only.startswith('8'):
             digits_only = '7' + digits_only[1:]
+        if len(digits_only) < 11:
+            QMessageBox.warning(self, "Номер водителя", "Неверный формат номера. Используйте 79XXXXXXXXX.")
+            return
 
-        invoice_date = db_string_to_ui_string(row_data.get('invoice_date'))
-        invoice_line = f"Счет №{row_data.get('invoice_no', '')}"
+        invoice_date = db_string_to_ui_string(order.get('invoice_date'))
+        invoice_line = f"Счет №{order.get('invoice_no', '')}" if order.get('invoice_no') else "Счет"
         if invoice_date:
             invoice_line = f"{invoice_line} от {invoice_date}"
 
-        address = row_data.get('delivery_address') or row_data.get('counterparty_address') or ""
+        address = order.get('delivery_address') or order.get('counterparty_address') or ""
         message = (
             "Привет, можно забирать:\n"
-            f"{row_data.get('counterparty_name', '')}\n"
+            f"{order.get('counterparty_name', '')}\n"
             f"{invoice_line}\n"
             f"Адрес: {address}"
         )
 
         QGuiApplication.clipboard().setText(message)
-        logging.info("Скопировано сообщение по заказу #%s для отправки водителю", row_data.get('id'))
+        logging.info("Скопировано сообщение по заказу #%s для отправки водителю", order.get('id'))
 
         url = QUrl(f"https://wa.me/{digits_only}?text={quote(message, safe='')}")
         if not QDesktopServices.openUrl(url):
             QMessageBox.warning(self, "Открытие WhatsApp", "Не удалось открыть чат WhatsApp.")
-        order_id = row_data.get('id')
+
+        order_id = order.get('id')
         if order_id is not None:
-            self.base_model.mark_notified(order_id)
+            self.base_model.set_notified(order_id, True)
+            checkbox.blockSignals(True)
+            checkbox.setChecked(True)
+            checkbox.blockSignals(False)
 

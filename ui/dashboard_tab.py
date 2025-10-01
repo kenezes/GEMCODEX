@@ -1,12 +1,28 @@
 import logging
 from functools import partial
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QGroupBox, QTableWidget, 
-                             QHeaderView, QAbstractItemView, QTableWidgetItem,
-                             QPushButton, QMessageBox, QMenu)
-from PySide6.QtGui import QColor, QBrush, QAction
-from PySide6.QtCore import Qt
+from urllib.parse import quote
+
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QGroupBox,
+    QTableWidget,
+    QHeaderView,
+    QAbstractItemView,
+    QTableWidgetItem,
+    QPushButton,
+    QMessageBox,
+    QMenu,
+    QHBoxLayout,
+    QCheckBox,
+    QInputDialog,
+    QLineEdit,
+)
+from PySide6.QtGui import QColor, QBrush, QAction, QDesktopServices, QGuiApplication
+from PySide6.QtCore import Qt, QUrl
 
 from ui.order_dialog import OrderDialog
+from ui.task_dialog import TaskDialog
 from ui.utils import db_string_to_ui_string
 
 class DashboardTab(QWidget):
@@ -15,6 +31,7 @@ class DashboardTab(QWidget):
         self.db = db
         self.event_bus = event_bus
         self.main_window = main_window
+        self._notified_orders: set[int] = set()
         self.init_ui()
         self.connect_events()
         self.refresh_all_tables()
@@ -38,6 +55,7 @@ class DashboardTab(QWidget):
         self.tasks_table = self._create_tasks_table()
         self.tasks_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.tasks_table.customContextMenuRequested.connect(self.show_tasks_context_menu)
+        self.tasks_table.cellDoubleClicked.connect(self.open_task_from_dashboard)
         tasks_layout.addWidget(self.tasks_table)
         tasks_group.setLayout(tasks_layout)
 
@@ -55,6 +73,7 @@ class DashboardTab(QWidget):
         self.orders_table = self._create_orders_table()
         self.orders_table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.orders_table.customContextMenuRequested.connect(self.show_orders_context_menu)
+        self.orders_table.cellDoubleClicked.connect(self.open_order_from_dashboard)
         orders_layout.addWidget(self.orders_table)
         orders_group.setLayout(orders_layout)
 
@@ -76,8 +95,17 @@ class DashboardTab(QWidget):
 
     def _create_tasks_table(self):
         table = QTableWidget()
-        table.setColumnCount(7)
-        table.setHorizontalHeaderLabels(["Задача", "Оборудование", "Исполнитель", "Срок", "Статус", "Приоритет", "Комментарий"])
+        table.setColumnCount(8)
+        table.setHorizontalHeaderLabels([
+            "Задача",
+            "Оборудование",
+            "Исполнитель",
+            "Срок",
+            "Статус",
+            "Приоритет",
+            "Комментарий",
+            "",
+        ])
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         header = table.horizontalHeader()
@@ -87,8 +115,16 @@ class DashboardTab(QWidget):
 
     def _create_orders_table(self):
         table = QTableWidget()
-        table.setColumnCount(6)
-        table.setHorizontalHeaderLabels(["Контрагент", "Счёт №", "Дата счёта", "Дата поставки", "Статус", "Комментарий"])
+        table.setColumnCount(7)
+        table.setHorizontalHeaderLabels([
+            "Контрагент",
+            "Счёт №",
+            "Дата счёта",
+            "Дата поставки",
+            "Статус",
+            "Комментарий",
+            "",
+        ])
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         header = table.horizontalHeader()
@@ -98,7 +134,7 @@ class DashboardTab(QWidget):
 
     def _create_periodic_table(self):
         table = QTableWidget()
-        table.setColumnCount(6)
+        table.setColumnCount(7)
         table.setHorizontalHeaderLabels([
             "Работа",
             "Объект",
@@ -106,6 +142,7 @@ class DashboardTab(QWidget):
             "Последняя дата",
             "След. дата",
             "Осталось",
+            "",
         ])
         table.setSelectionBehavior(QAbstractItemView.SelectRows)
         table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -169,7 +206,7 @@ class DashboardTab(QWidget):
         priority_colors = {"высокий": QColor("#FFCCCC"), "средний": QColor("#FFE5CC"), "низкий": QColor("#FFFFCC")}
         for row, task in enumerate(tasks):
             self.tasks_table.insertRow(row)
-            
+
             title_text = task['title']
             if task.get('is_replacement'):
                 title_text = f"[Замена] {title_text}"
@@ -184,15 +221,303 @@ class DashboardTab(QWidget):
             self.tasks_table.setItem(row, 4, QTableWidgetItem(task['status']))
             self.tasks_table.setItem(row, 5, QTableWidgetItem(task['priority']))
             self.tasks_table.setItem(row, 6, QTableWidgetItem(task.get('description', '')))
-            
+
             color = priority_colors.get(task['priority'])
             if color:
-                for col in range(self.tasks_table.columnCount()):
-                    self.tasks_table.item(row, col).setBackground(QBrush(color))
+                for col in range(self.tasks_table.columnCount() - 1):
+                    item = self.tasks_table.item(row, col)
+                    if item:
+                        item.setBackground(QBrush(color))
+
+            self.tasks_table.setCellWidget(row, 7, self._build_task_actions_widget(task))
+
+    def _build_task_actions_widget(self, task: dict) -> QWidget:
+        task_id = task.get('id')
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        actions = [
+            ("Выполнить", lambda: self.change_task_status(task_id, 'выполнена'), "#2e7d32"),
+            ("Отменить", lambda: self.change_task_status(task_id, 'отменена'), "#c62828"),
+            ("Стоп", lambda: self.change_task_status(task_id, 'на стопе'), "#f9a825"),
+        ]
+
+        for text, handler, color in actions:
+            button = self._create_small_button(text, color)
+            if task_id is not None:
+                button.clicked.connect(handler)
+            else:
+                button.setEnabled(False)
+            layout.addWidget(button)
+
+        layout.addStretch()
+        return widget
+
+    def _build_periodic_actions_widget(self, task: dict) -> QWidget:
+        task_id = task.get('id')
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        actions = [
+            ("Выполнить", 'complete', "#2e7d32"),
+            ("Отменить", 'cancel', "#c62828"),
+            ("Стоп", 'pause', "#f9a825"),
+        ]
+
+        for text, action, color in actions:
+            button = self._create_small_button(text, color)
+            if task_id is not None:
+                button.clicked.connect(lambda _, t_id=task_id, act=action: self._handle_periodic_action(t_id, act))
+            else:
+                button.setEnabled(False)
+            layout.addWidget(button)
+
+        layout.addStretch()
+        return widget
+
+    def _handle_periodic_action(self, task_id: int, action: str):
+        if not task_id:
+            return
+
+        action_map = {
+            'complete': self.db.complete_periodic_task,
+            'cancel': self.db.cancel_periodic_task,
+            'pause': self.db.pause_periodic_task,
+        }
+
+        handler = action_map.get(action)
+        if not handler:
+            logging.warning("Неизвестное действие для периодической работы: %s", action)
+            return
+
+        success, message, _ = handler(task_id)
+        if success:
+            QMessageBox.information(self, "Периодическая работа", message)
+            self.event_bus.emit("periodic_tasks.changed")
+        else:
+            QMessageBox.warning(self, "Периодическая работа", message)
+
+    @staticmethod
+    def _create_small_button(text: str, background: str | None = None, *, text_color: str = "#ffffff") -> QPushButton:
+        button = QPushButton(text)
+        button.setCursor(Qt.PointingHandCursor)
+        button.setFixedHeight(26)
+        base_style = [
+            "QPushButton {",
+            "padding: 4px 8px;",
+            "border-radius: 4px;",
+            "font-size: 12px;",
+        ]
+
+        if background:
+            base_style.append(f"background-color: {background};")
+            base_style.append(f"color: {text_color};")
+            base_style.append("border: none;")
+        else:
+            base_style.append("background-color: #e0e0e0;")
+            base_style.append("color: #000000;")
+            base_style.append("border: 1px solid #bdbdbd;")
+
+        base_style.append("}\n")
+        base_style.append("QPushButton:disabled { background-color: #f0f0f0; color: #9e9e9e; }")
+        button.setStyleSheet("".join(base_style))
+        return button
+
+    def _build_order_actions_widget(self, order: dict) -> QWidget:
+        order_id = order.get('id')
+        widget = QWidget()
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+
+        accept_button = self._create_small_button("Принять", "#2e7d32")
+        accept_button.setToolTip("Принять поставку")
+        if order_id is not None:
+            accept_button.clicked.connect(lambda _, o_id=order_id: self._accept_order_from_dashboard(o_id))
+        else:
+            accept_button.setEnabled(False)
+        layout.addWidget(accept_button)
+
+        invoice_button = self._create_small_button("Счёт")
+        invoice_button.setToolTip("Отметить заказ как отправленный")
+        self._update_invoice_button_style(invoice_button, order.get('status'))
+        if order_id is not None:
+            invoice_button.clicked.connect(
+                lambda _, o_id=order_id, btn=invoice_button: self._mark_order_in_transit(o_id, btn)
+            )
+        else:
+            invoice_button.setEnabled(False)
+        layout.addWidget(invoice_button)
+
+        checkbox = QCheckBox()
+        checkbox.setToolTip("Водитель уведомлён")
+        if order_id is not None and order_id in self._notified_orders:
+            checkbox.setChecked(True)
+        if order_id is not None:
+            checkbox.stateChanged.connect(
+                lambda state, o_id=order_id: self._set_order_notified(o_id, state == Qt.Checked)
+            )
+        else:
+            checkbox.setEnabled(False)
+        layout.addWidget(checkbox)
+
+        phone_button = self._create_small_button("📞", "#0277bd")
+        phone_button.setToolTip("Отправить данные водителю")
+        if order_id is not None:
+            phone_button.clicked.connect(
+                lambda _, data=order, chk=checkbox: self._send_order_to_driver(data, chk)
+            )
+        else:
+            phone_button.setEnabled(False)
+        layout.addWidget(phone_button)
+
+        layout.addStretch()
+        return widget
+
+    @staticmethod
+    def _update_invoice_button_style(button: QPushButton, status: str | None):
+        if status in {"в пути", "принят"}:
+            button.setStyleSheet(
+                """
+                QPushButton {
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                    font-size: 12px;
+                    background-color: #2e7d32;
+                    color: #ffffff;
+                    border: none;
+                }
+                QPushButton:disabled {
+                    background-color: #a5d6a7;
+                    color: #f5f5f5;
+                }
+                """
+            )
+        else:
+            button.setStyleSheet(
+                """
+                QPushButton {
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                    font-size: 12px;
+                    background-color: #c62828;
+                    color: #ffffff;
+                    border: none;
+                }
+                QPushButton:disabled {
+                    background-color: #ef9a9a;
+                    color: #fbe9e7;
+                }
+                """
+            )
+
+    def _accept_order_from_dashboard(self, order_id: int):
+        self.change_order_status(order_id, 'принят')
+
+    def _mark_order_in_transit(self, order_id: int, button: QPushButton):
+        if self.change_order_status(order_id, 'в пути'):
+            self._update_invoice_button_style(button, 'в пути')
+
+    def _set_order_notified(self, order_id: int, notified: bool):
+        if notified:
+            self._notified_orders.add(order_id)
+        else:
+            self._notified_orders.discard(order_id)
+
+    def _send_order_to_driver(self, order: dict, checkbox: QCheckBox):
+        phone_number = self._request_driver_phone()
+        if not phone_number:
+            return
+
+        invoice_no = order.get('invoice_no', '')
+        invoice_date = db_string_to_ui_string(order.get('invoice_date'))
+        invoice_line = f"Счет №{invoice_no}" if invoice_no else "Счет"
+        if invoice_date:
+            invoice_line = f"{invoice_line} от {invoice_date}"
+
+        address = order.get('delivery_address') or order.get('counterparty_address') or ""
+        message = (
+            "Привет, можно забирать:\n"
+            f"{order.get('counterparty_name', '')}\n"
+            f"{invoice_line}\n"
+            f"Адрес: {address}"
+        )
+
+        QGuiApplication.clipboard().setText(message)
+        url = QUrl(f"https://wa.me/{phone_number}?text={quote(message, safe='')}")
+        if not QDesktopServices.openUrl(url):
+            QMessageBox.warning(self, "Отправка сообщения", "Не удалось открыть WhatsApp.")
+
+        order_id = order.get('id')
+        if order_id is not None:
+            self._set_order_notified(order_id, True)
+            checkbox.blockSignals(True)
+            checkbox.setChecked(True)
+            checkbox.blockSignals(False)
+
+    def _request_driver_phone(self) -> str:
+        default_value = ""
+        orders_tab = getattr(self.main_window, 'orders_tab', None)
+        driver_input = getattr(orders_tab, 'driver_phone_input', None) if orders_tab else None
+        if driver_input:
+            default_value = driver_input.text()
+
+        text, ok = QInputDialog.getText(
+            self,
+            "Номер водителя",
+            "Укажите номер телефона водителя:",
+            QLineEdit.Normal,
+            default_value,
+        )
+
+        if not ok:
+            return ""
+
+        digits_only = ''.join(ch for ch in text if ch.isdigit())
+        if not digits_only:
+            QMessageBox.warning(self, "Номер водителя", "Номер телефона не указан.")
+            return ""
+
+        if len(digits_only) == 11 and digits_only.startswith('8'):
+            digits_only = '7' + digits_only[1:]
+
+        if len(digits_only) < 11:
+            QMessageBox.warning(self, "Номер водителя", "Укажите номер в формате 79XXXXXXXXX.")
+            return ""
+
+        return digits_only
+
+    def open_task_from_dashboard(self, row: int, column: int):
+        item = self.tasks_table.item(row, 0)
+        if not item:
+            return
+        task_id = item.data(Qt.UserRole)
+        if not task_id:
+            return
+
+        dialog = TaskDialog(self.db, self.event_bus, task_id=task_id, parent=self.main_window)
+        dialog.exec()
+
+    def open_order_from_dashboard(self, row: int, column: int):
+        item = self.orders_table.item(row, 0)
+        if not item:
+            return
+        order_id = item.data(Qt.UserRole)
+        if not order_id:
+            return
+
+        dialog = OrderDialog(self.db, self.event_bus, order_id=order_id, parent=self.main_window)
+        dialog.exec()
 
     def refresh_orders_table(self):
         self.orders_table.setRowCount(0)
         orders = self.db.get_active_orders()
+        current_ids = {order['id'] for order in orders if order.get('id') is not None}
+        self._notified_orders.intersection_update(current_ids)
         for row, order in enumerate(orders):
             self.orders_table.insertRow(row)
 
@@ -205,6 +530,8 @@ class DashboardTab(QWidget):
             self.orders_table.setItem(row, 3, QTableWidgetItem(db_string_to_ui_string(order.get('delivery_date'))))
             self.orders_table.setItem(row, 4, QTableWidgetItem(order['status']))
             self.orders_table.setItem(row, 5, QTableWidgetItem(order.get('comment', '')))
+
+            self.orders_table.setCellWidget(row, 6, self._build_order_actions_widget(order))
 
     def refresh_periodic_tasks_table(self):
         tasks = self.db.get_due_periodic_tasks()
@@ -242,6 +569,8 @@ class DashboardTab(QWidget):
                     item = table.item(row, col)
                     if item:
                         item.setBackground(QBrush(color))
+
+            table.setCellWidget(row, 6, self._build_periodic_actions_widget(task))
 
         table.resizeColumnsToContents()
 
@@ -375,20 +704,23 @@ class DashboardTab(QWidget):
     def change_order_status(self, order_id, new_status):
         # Особый случай для приемки
         if new_status == 'принят':
-            reply = QMessageBox.question(self, "Подтверждение", 
+            reply = QMessageBox.question(self, "Подтверждение",
                                        "Приемка поставки пополнит остатки на складе. Продолжить?",
                                        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
-            if reply == QMessageBox.No: return
+            if reply == QMessageBox.No:
+                return False
             success, message = self.db.accept_delivery(order_id)
         else:
             success, message = self.db.update_order_status(order_id, new_status)
-        
+
         if success:
             self.event_bus.emit("orders.changed")
             if new_status == 'принят':
                 self.event_bus.emit("parts.changed")
+            return True
         else:
             QMessageBox.critical(self, "Ошибка", message)
+        return False
 
     def delete_order_from_dashboard(self, order_id):
         reply = QMessageBox.question(self, "Подтверждение удаления",
