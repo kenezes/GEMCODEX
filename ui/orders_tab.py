@@ -2,9 +2,9 @@ import logging
 from urllib.parse import quote
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QToolBar, QTableView, QAbstractItemView,
                              QHeaderView, QMessageBox, QCheckBox, QHBoxLayout, QMenu, QPushButton, QSizePolicy,
-                             QLabel, QLineEdit, QStyledItemDelegate)
+                             QLabel, QLineEdit, QStyledItemDelegate, QStyleOptionButton, QStyle)
 from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, Signal, QEvent, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication, QStyleOptionButton, QStyle
+from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
 
 from .order_dialog import OrderDialog
 from ui.utils import db_string_to_ui_string, apply_table_compact_style
