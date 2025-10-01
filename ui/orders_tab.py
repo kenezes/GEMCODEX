@@ -1,17 +1,61 @@
 import logging
+from urllib.parse import quote
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QToolBar, QTableView, QAbstractItemView,
-                             QHeaderView, QMessageBox, QCheckBox, QHBoxLayout, QMenu, QPushButton, QSizePolicy)
-from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex
-from PySide6.QtGui import QAction
+                             QHeaderView, QMessageBox, QCheckBox, QHBoxLayout, QMenu, QPushButton, QSizePolicy,
+                             QLabel, QLineEdit, QStyledItemDelegate)
+from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, Signal, QEvent, QUrl
+from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication, QStyleOptionButton, QStyle
 
 from .order_dialog import OrderDialog
-from ui.utils import db_string_to_ui_string
+from ui.utils import db_string_to_ui_string, apply_table_compact_style
+
+
+class ActionButtonDelegate(QStyledItemDelegate):
+    """Рисует кнопку "Сообщить" и обрабатывает клики по ней."""
+
+    clicked = Signal(QModelIndex)
+
+    def paint(self, painter, option, index):  # type: ignore[override]
+        button_option = QStyleOptionButton()
+        button_option.rect = option.rect.adjusted(4, 4, -4, -4)
+        button_option.text = "Сообщить"
+        button_option.state = QStyle.State_Enabled
+        if option.state & QStyle.State_MouseOver:
+            button_option.state |= QStyle.State_MouseOver
+        option.widget.style().drawControl(QStyle.CE_PushButton, button_option, painter, option.widget)
+
+    def editorEvent(self, event, model, option, index):  # type: ignore[override]
+        if event.type() == QEvent.MouseButtonPress and option.rect.contains(event.pos()):
+            if hasattr(event, 'button') and event.button() != Qt.LeftButton:
+                return False
+            return True
+        if event.type() == QEvent.MouseButtonRelease and option.rect.contains(event.pos()):
+            if hasattr(event, 'button') and event.button() != Qt.LeftButton:
+                return False
+            self.clicked.emit(index)
+            return True
+        return False
 
 class OrdersTableModel(QAbstractTableModel):
     """Модель данных для таблицы заказов."""
+
+    COUNTERPARTY_COLUMN = 0
+    STATUS_COLUMN = 6
+    ACTION_COLUMN = 8
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._headers = ["Контрагент", "Счёт №", "Дата счёта", "Дата поставки", "Дата создания", "Статус", "Комментарий"]
+        self._headers = [
+            "Контрагент",
+            "Счёт №",
+            "Дата счёта",
+            "Дата поставки",
+            "Дата создания",
+            "Адрес доставки",
+            "Статус",
+            "Комментарий",
+            "",
+        ]
         self._data = []
 
     def rowCount(self, parent=QModelIndex()):
@@ -33,12 +77,20 @@ class OrdersTableModel(QAbstractTableModel):
             if col == 2: return db_string_to_ui_string(row_data.get('invoice_date'))
             if col == 3: return db_string_to_ui_string(row_data.get('delivery_date'))
             if col == 4: return db_string_to_ui_string(row_data.get('created_at', '').split(' ')[0]) # Только дата
-            if col == 5: return row_data['status']
-            if col == 6: return row_data.get('comment', '')
-            
+            if col == 5: return row_data.get('delivery_address') or row_data.get('counterparty_address', '')
+            if col == 6: return row_data['status']
+            if col == 7: return row_data.get('comment', '')
+            if col == 8: return "Сообщить"
+
+        if role == Qt.TextAlignmentRole and col == self.ACTION_COLUMN:
+            return Qt.AlignCenter
+
         if role == Qt.UserRole:
             return row_data['id']
-            
+
+        if role == Qt.UserRole + 1:
+            return row_data
+
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
@@ -46,10 +98,22 @@ class OrdersTableModel(QAbstractTableModel):
             return self._headers[section]
         return None
 
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemIsEnabled
+        if index.column() == self.ACTION_COLUMN:
+            return Qt.ItemIsEnabled
+        return super().flags(index)
+
     def load_data(self, data):
         self.beginResetModel()
         self._data = data
         self.endResetModel()
+
+    def get_row(self, row_index: int) -> dict | None:
+        if 0 <= row_index < len(self._data):
+            return self._data[row_index]
+        return None
 
 class OrdersFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
@@ -64,7 +128,7 @@ class OrdersFilterProxyModel(QSortFilterProxyModel):
         if not self._hide_completed:
             return True
         
-        index = self.sourceModel().index(source_row, 5, source_parent) # 5 - колонка статуса
+        index = self.sourceModel().index(source_row, OrdersTableModel.STATUS_COLUMN, source_parent)
         status = self.sourceModel().data(index)
         return status not in ('принят', 'отменён')
 
@@ -108,7 +172,26 @@ class OrdersTab(QWidget):
         self.toolbar.addSeparator()
         self.toolbar.addWidget(self.accept_delivery_button)
         self.toolbar.addSeparator()
-        
+
+        driver_layout = QHBoxLayout()
+        driver_layout.setContentsMargins(0, 0, 0, 0)
+        driver_layout.setSpacing(6)
+
+        driver_container = QWidget()
+        driver_container.setLayout(driver_layout)
+
+        driver_label = QLabel("Номер водителя:")
+        self.driver_phone_input = QLineEdit()
+        self.driver_phone_input.setPlaceholderText("Например, 79991234567")
+        self.driver_phone_input.setMaximumWidth(180)
+        self.driver_phone_input.setClearButtonEnabled(True)
+
+        driver_layout.addWidget(driver_label)
+        driver_layout.addWidget(self.driver_phone_input)
+
+        self.toolbar.addWidget(driver_container)
+        self.toolbar.addSeparator()
+
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         spacer.setFixedWidth(20)
@@ -142,15 +225,27 @@ class OrdersTab(QWidget):
         self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._create_context_menu)
         self.table_view.doubleClicked.connect(self.edit_selected_order)
-        
+        self.table_view.verticalHeader().setVisible(False)
+
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
+
+        apply_table_compact_style(self.table_view)
+
+        self.action_delegate = ActionButtonDelegate(self.table_view)
+        self.action_delegate.clicked.connect(self._handle_action_button)
+        self.table_view.setItemDelegateForColumn(OrdersTableModel.ACTION_COLUMN, self.action_delegate)
+        self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 120)
 
     def refresh_data(self):
         logging.info("Обновление данных на вкладке 'Заказы'")
         orders_data = self.db.get_all_orders_with_counterparty()
         self.base_model.load_data(orders_data)
+        self.table_view.resizeColumnToContents(OrdersTableModel.ACTION_COLUMN)
+        current_width = self.table_view.columnWidth(OrdersTableModel.ACTION_COLUMN)
+        if current_width < 120:
+            self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 120)
 
     def toggle_hide_completed(self, state):
         self.proxy_model.set_hide_completed(state == Qt.Checked)
@@ -225,6 +320,40 @@ class OrdersTab(QWidget):
         menu.addAction(delete_action) # Добавляем
         menu.addSeparator()
         menu.addAction(accept_action)
-        
+
         menu.exec(self.table_view.viewport().mapToGlobal(position))
+
+    def _handle_action_button(self, proxy_index: QModelIndex):
+        source_index = self.proxy_model.mapToSource(proxy_index)
+        row_data = self.base_model.get_row(source_index.row())
+        if not row_data:
+            return
+
+        driver_number_raw = self.driver_phone_input.text().strip()
+        digits_only = ''.join(ch for ch in driver_number_raw if ch.isdigit())
+        if not digits_only:
+            QMessageBox.warning(self, "Номер водителя", "Укажите номер водителя, чтобы отправить сообщение.")
+            return
+        if len(digits_only) == 11 and digits_only.startswith('8'):
+            digits_only = '7' + digits_only[1:]
+
+        invoice_date = db_string_to_ui_string(row_data.get('invoice_date'))
+        invoice_line = f"Счет №{row_data.get('invoice_no', '')}"
+        if invoice_date:
+            invoice_line = f"{invoice_line} от {invoice_date}"
+
+        address = row_data.get('delivery_address') or row_data.get('counterparty_address') or ""
+        message = (
+            "Привет, можно забирать:\n"
+            f"{row_data.get('counterparty_name', '')}\n"
+            f"{invoice_line}\n"
+            f"Адрес: {address}"
+        )
+
+        QGuiApplication.clipboard().setText(message)
+        logging.info("Скопировано сообщение по заказу #%s для отправки водителю", row_data.get('id'))
+
+        url = QUrl(f"https://wa.me/{digits_only}?text={quote(message, safe='')}")
+        if not QDesktopServices.openUrl(url):
+            QMessageBox.warning(self, "Открытие WhatsApp", "Не удалось открыть чат WhatsApp.")
 

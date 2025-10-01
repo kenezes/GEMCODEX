@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex
 
-from ui.utils import db_string_to_ui_string
+from ui.utils import db_string_to_ui_string, apply_table_compact_style
 from .knife_sharpen_history_dialog import KnifeSharpenHistoryDialog
 
 
@@ -235,6 +235,8 @@ class SharpeningTab(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
         header.setSectionResizeMode(SharpeningTableModel.ACTION_COLUMN, QHeaderView.Stretch)
+
+        apply_table_compact_style(self.table_view)
 
         self.proxy_model.layoutChanged.connect(self._populate_action_widgets)
         self.proxy_model.modelReset.connect(self._populate_action_widgets)

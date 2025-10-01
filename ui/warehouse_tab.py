@@ -8,6 +8,7 @@ from PySide6.QtGui import QAction
 
 from .part_dialog import PartDialog
 from .category_manager_dialog import CategoryManagerDialog
+from .utils import apply_table_compact_style
 
 class WarehouseTab(QWidget):
     def __init__(self, db, event_bus, parent=None):
@@ -76,6 +77,8 @@ class WarehouseTab(QWidget):
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
+
+        apply_table_compact_style(self.table_view)
 
     def load_categories(self):
         current_cat = self.category_filter.currentData()

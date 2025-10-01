@@ -7,6 +7,7 @@ from PySide6.QtCore import (Qt, QAbstractTableModel, QModelIndex,
 from PySide6.QtGui import QAction
 
 from .counterparty_dialog import CounterpartyDialog
+from .utils import apply_table_compact_style
 
 class CounterpartiesTab(QWidget):
     def __init__(self, db, event_bus, parent=None):
@@ -65,6 +66,8 @@ class CounterpartiesTab(QWidget):
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
+
+        apply_table_compact_style(self.table_view)
         
     def refresh_data(self, *args, **kwargs):
         counterparties = self.db.get_all_counterparties()

@@ -6,7 +6,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QDate, QAbstractTableModel, QModelIndex
 
-from .utils import qdate_to_db_string
+from .utils import qdate_to_db_string, apply_table_compact_style
 from .part_selection_dialog import PartSelectionDialog
 from .manual_part_dialog import ManualPartDialog
 
@@ -108,7 +108,9 @@ class OrderDialog(QDialog):
         self.event_bus = event_bus
         self.order_id = order_id
         self.is_edit_mode = self.order_id is not None
-        
+        self._counterparty_addresses: dict[int, list[dict]] = {}
+        self._pending_delivery_address: str | None = None
+
         title = "Редактировать заказ" if self.is_edit_mode else "Новый заказ"
         self.setWindowTitle(title)
         self.setMinimumSize(800, 600)
@@ -126,9 +128,12 @@ class OrderDialog(QDialog):
 
     def init_ui(self):
         main_layout = QVBoxLayout(self)
-        
+
         form_layout = QFormLayout()
         self.counterparty_combo = QComboBox()
+        self.counterparty_combo.currentIndexChanged.connect(self._on_counterparty_changed)
+        self.address_combo = QComboBox()
+        self.address_combo.setPlaceholderText("Выберите адрес")
         self.invoice_no_edit = QLineEdit()
         self.invoice_date_edit = QDateEdit(QDate.currentDate())
         self.invoice_date_edit.setCalendarPopup(True)
@@ -139,6 +144,7 @@ class OrderDialog(QDialog):
         self.comment_edit.setFixedHeight(60)
 
         form_layout.addRow("Контрагент*:", self.counterparty_combo)
+        form_layout.addRow("Адрес доставки:", self.address_combo)
         form_layout.addRow("Счёт №*:", self.invoice_no_edit)
         form_layout.addRow("Дата счёта:", self.invoice_date_edit)
         form_layout.addRow("Дата поставки:", self.delivery_date_edit)
@@ -168,6 +174,7 @@ class OrderDialog(QDialog):
         self.items_table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.items_table_view.horizontalHeader().setStretchLastSection(True)
         self.items_table_view.verticalHeader().setVisible(False)
+        apply_table_compact_style(self.items_table_view)
         self.items_table_view.setEditTriggers(QAbstractItemView.DoubleClicked)
         
         items_layout.addLayout(items_buttons_layout)
@@ -183,11 +190,57 @@ class OrderDialog(QDialog):
     def load_combobox_data(self):
         try:
             counterparties = self.db.get_all_counterparties()
+            self.counterparty_combo.blockSignals(True)
+            self.counterparty_combo.clear()
+            self._counterparty_addresses.clear()
             for cp in counterparties:
-                self.counterparty_combo.addItem(cp['name'], userData=cp['id'])
+                cp_id = cp['id']
+                self.counterparty_combo.addItem(cp['name'], userData=cp_id)
+                self._counterparty_addresses[cp_id] = cp.get('addresses', [])
+            self.counterparty_combo.blockSignals(False)
+            if self.counterparty_combo.count() > 0:
+                self.counterparty_combo.setCurrentIndex(0)
+            else:
+                self._update_address_combo()
         except Exception as e:
             logging.error(f"Не удалось загрузить контрагентов: {e}")
         self.status_combo.addItems(['создан', 'в пути', 'принят', 'отменён'])
+
+    def _on_counterparty_changed(self, _index=None):
+        self._update_address_combo()
+
+    def _update_address_combo(self):
+        counterparty_id = self.counterparty_combo.currentData()
+        addresses = self._counterparty_addresses.get(counterparty_id, [])
+        selected_address = self._pending_delivery_address
+
+        self.address_combo.blockSignals(True)
+        self.address_combo.clear()
+
+        default_index = -1
+        for idx, entry in enumerate(addresses):
+            address_text = entry.get('address', '')
+            self.address_combo.addItem(address_text, address_text)
+            if entry.get('is_default') and default_index == -1:
+                default_index = idx
+
+        if selected_address:
+            index = self.address_combo.findData(selected_address)
+            if index == -1 and selected_address.strip():
+                self.address_combo.addItem(selected_address, selected_address)
+                index = self.address_combo.findData(selected_address)
+            if index >= 0:
+                self.address_combo.setCurrentIndex(index)
+            elif default_index >= 0:
+                self.address_combo.setCurrentIndex(default_index)
+        elif default_index >= 0:
+            self.address_combo.setCurrentIndex(default_index)
+        elif addresses:
+            self.address_combo.setCurrentIndex(0)
+
+        self.address_combo.blockSignals(False)
+        self.address_combo.setEnabled(bool(addresses) or bool(self.address_combo.currentText().strip()))
+        self._pending_delivery_address = None
 
     def load_order_data(self):
         try:
@@ -195,7 +248,13 @@ class OrderDialog(QDialog):
             if not order_data:
                 QMessageBox.critical(self, "Ошибка", "Заказ не найден."); self.reject(); return
 
-            self.counterparty_combo.setCurrentIndex(self.counterparty_combo.findData(order_data['counterparty_id']))
+            self._pending_delivery_address = order_data.get('delivery_address')
+            target_index = self.counterparty_combo.findData(order_data['counterparty_id'])
+            if target_index != -1:
+                self.counterparty_combo.setCurrentIndex(target_index)
+            else:
+                self.counterparty_combo.setCurrentIndex(0 if self.counterparty_combo.count() else -1)
+                self._update_address_combo()
             self.invoice_no_edit.setText(order_data['invoice_no'])
             self.invoice_date_edit.setDate(QDate.fromString(order_data['invoice_date'], 'yyyy-MM-dd'))
             self.delivery_date_edit.setDate(QDate.fromString(order_data['delivery_date'], 'yyyy-MM-dd'))
@@ -260,6 +319,7 @@ class OrderDialog(QDialog):
             "invoice_no": self.invoice_no_edit.text().strip(),
             "invoice_date": qdate_to_db_string(self.invoice_date_edit.date()),
             "delivery_date": qdate_to_db_string(self.delivery_date_edit.date()),
+            "delivery_address": (self.address_combo.currentData() if self.address_combo.currentData() is not None else self.address_combo.currentText()).strip(),
             "status": self.status_combo.currentText(),
             "comment": self.comment_edit.toPlainText().strip()
         }

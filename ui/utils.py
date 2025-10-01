@@ -6,7 +6,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QDate, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QMessageBox, QTableView
 
 _ROOT_DIR = Path(__file__).resolve().parents[1]
 PARTS_FILES_DIR = _ROOT_DIR / "data" / "parts"
@@ -77,6 +77,24 @@ def open_part_folder(name: str, sku: str):
 
 def open_equipment_folder(name: str, sku: str | None):
     open_folder(get_equipment_folder_path(name, sku))
+
+
+def apply_table_compact_style(table_view: QTableView, *, row_height: int = 28, padding_v: int = 3, padding_h: int = 6):
+    """Слегка уменьшает высоту строк таблиц и отступы ячеек."""
+
+    vertical_header = table_view.verticalHeader()
+    if vertical_header:
+        vertical_header.setDefaultSectionSize(row_height)
+        vertical_header.setMinimumSectionSize(row_height - 4 if row_height > 4 else row_height)
+
+    style_sheet = (
+        "QTableView::item{padding:%dpx %dpx;}" % (padding_v, padding_h)
+    )
+    existing_style = table_view.styleSheet()
+    if existing_style:
+        table_view.setStyleSheet(existing_style + " " + style_sheet)
+    else:
+        table_view.setStyleSheet(style_sheet)
 
 
 def _merge_directories(src: Path, dst: Path):
