@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QMode
 from PySide6.QtGui import QAction
 
 from .edit_replacement_dialog import EditReplacementDialog
-from .utils import db_string_to_ui_string, qdate_to_db_string
+from .utils import db_string_to_ui_string, qdate_to_db_string, apply_table_compact_style
 
 class ReplacementsTableModel(QAbstractTableModel):
     def __init__(self, parent=None):
@@ -131,6 +131,8 @@ class ReplacementHistoryTab(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
+
+        apply_table_compact_style(self.table)
 
         main_layout.addWidget(filters_group)
         main_layout.addWidget(self.table)

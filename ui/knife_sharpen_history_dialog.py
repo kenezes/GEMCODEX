@@ -2,7 +2,7 @@ from PySide6.QtCore import Qt, QAbstractTableModel, QModelIndex
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton,
                                QTableView, QHeaderView, QMessageBox, QAbstractItemView)
 
-from .utils import db_string_to_ui_string
+from .utils import db_string_to_ui_string, apply_table_compact_style
 
 
 class KnifeSharpenHistoryModel(QAbstractTableModel):
@@ -81,6 +81,8 @@ class KnifeSharpenHistoryDialog(QDialog):
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self.table.selectionModel().selectionChanged.connect(self.on_selection_changed)
+
+        apply_table_compact_style(self.table)
 
         layout.addLayout(controls_layout)
         layout.addWidget(self.table)

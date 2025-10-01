@@ -3,6 +3,7 @@ import logging
 from pathlib import Path
 from typing import Any, Optional
 from datetime import date, datetime
+from collections import defaultdict
 
 class Database:
     """Класс для управления базой данных SQLite."""
@@ -18,6 +19,85 @@ class Database:
     def _log_action(self, message: str):
         """Записывает действие пользователя в журнал."""
         logging.info(f"[ACTION] {message}")
+
+    @staticmethod
+    def _normalize_addresses(addresses: list[dict[str, Any]] | list[str] | None) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        if not addresses:
+            return normalized
+
+        default_assigned = False
+        for entry in addresses:
+            if isinstance(entry, str):
+                address_text = entry.strip()
+                is_default = False
+            else:
+                address_text = (entry.get("address") or "").strip()
+                is_default = bool(entry.get("is_default", False))
+
+            if not address_text:
+                continue
+
+            if is_default and default_assigned:
+                is_default = False
+            elif is_default:
+                default_assigned = True
+
+            normalized.append({"address": address_text, "is_default": is_default})
+
+        if normalized and not any(addr["is_default"] for addr in normalized):
+            normalized[0]["is_default"] = True
+
+        return normalized
+
+    def _replace_counterparty_addresses(self, cursor: sqlite3.Cursor, counterparty_id: int,
+                                         addresses: list[dict[str, Any]]):
+        cursor.execute("DELETE FROM counterparty_addresses WHERE counterparty_id = ?", (counterparty_id,))
+        default_address = ""
+
+        for entry in addresses:
+            cursor.execute(
+                "INSERT INTO counterparty_addresses (counterparty_id, address, is_default) VALUES (?, ?, ?)",
+                (counterparty_id, entry["address"], 1 if entry.get("is_default") else 0),
+            )
+            if entry.get("is_default") and not default_address:
+                default_address = entry["address"]
+
+        if not default_address and addresses:
+            default_address = addresses[0]["address"]
+
+        cursor.execute("UPDATE counterparties SET address = ? WHERE id = ?", (default_address, counterparty_id))
+
+    @staticmethod
+    def _format_addresses_for_display(addresses: list[dict[str, Any]]) -> str:
+        formatted = []
+        for entry in addresses:
+            suffix = " (по умолчанию)" if entry.get("is_default") else ""
+            formatted.append(f"{entry['address']}{suffix}")
+        return "\n".join(formatted)
+
+    def _get_counterparty_addresses_map(self, counterparty_ids: list[int] | None = None) -> dict[int, list[dict[str, Any]]]:
+        if counterparty_ids:
+            placeholders = ",".join("?" for _ in counterparty_ids)
+            query = (
+                "SELECT counterparty_id, address, is_default FROM counterparty_addresses "
+                f"WHERE counterparty_id IN ({placeholders}) "
+                "ORDER BY counterparty_id, is_default DESC, id"
+            )
+            rows = self.fetchall(query, tuple(counterparty_ids))
+        else:
+            rows = self.fetchall(
+                "SELECT counterparty_id, address, is_default FROM counterparty_addresses "
+                "ORDER BY counterparty_id, is_default DESC, id"
+            )
+
+        result: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            result[row["counterparty_id"]].append({
+                "address": row["address"],
+                "is_default": bool(row["is_default"]),
+            })
+        return result
 
     def connect(self):
         """Устанавливает соединение с БД и настраивает PRAGMA."""
@@ -184,6 +264,13 @@ class Database:
             cursor.execute("PRAGMA user_version = 10;")
             self.conn.commit()
             logging.info("Database migrated to version 10.")
+
+        if user_version < 11:
+            logging.info("Applying migration to version 11...")
+            self._apply_migration_v11()
+            cursor.execute("PRAGMA user_version = 11;")
+            self.conn.commit()
+            logging.info("Database migrated to version 11.")
 
 
     def _apply_migration_v1(self):
@@ -501,6 +588,63 @@ class Database:
                 exc_info=True,
             )
 
+    def _apply_migration_v11(self):
+        """Добавляет поддержку нескольких адресов контрагента и адрес доставки в заказе."""
+        if not self.conn:
+            return
+
+        cursor = self.conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                    CREATE TABLE IF NOT EXISTS counterparty_addresses (
+                        id INTEGER PRIMARY KEY,
+                        counterparty_id INTEGER NOT NULL,
+                        address TEXT NOT NULL,
+                        is_default INTEGER NOT NULL DEFAULT 0,
+                        FOREIGN KEY (counterparty_id) REFERENCES counterparties(id) ON DELETE CASCADE
+                    );
+                """
+            )
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS counterparty_addresses_counterparty_id_idx"
+                " ON counterparty_addresses(counterparty_id)"
+            )
+        except sqlite3.Error as exc:
+            logging.error("Migration v11: ошибка при создании таблицы counterparty_addresses: %s", exc, exc_info=True)
+
+        try:
+            cursor.execute("ALTER TABLE orders ADD COLUMN delivery_address TEXT;")
+        except sqlite3.OperationalError as exc:
+            logging.info("Migration v11: колонка orders.delivery_address уже существует: %s", exc)
+
+        try:
+            cursor.execute("SELECT id, address FROM counterparties WHERE address IS NOT NULL AND TRIM(address) <> ''")
+            rows = cursor.fetchall()
+            for row in rows:
+                cursor.execute(
+                    "INSERT OR IGNORE INTO counterparty_addresses (counterparty_id, address, is_default) VALUES (?, ?, 1)",
+                    (row["id"], row["address"].strip()),
+                )
+        except sqlite3.Error as exc:
+            logging.error("Migration v11: ошибка переноса адресов контрагентов: %s", exc, exc_info=True)
+
+        try:
+            cursor.execute(
+                """
+                    UPDATE orders
+                    SET delivery_address = (
+                        SELECT COALESCE(c.address, '')
+                        FROM counterparties c
+                        WHERE c.id = orders.counterparty_id
+                    )
+                    WHERE delivery_address IS NULL OR delivery_address = '';
+                """
+            )
+        except sqlite3.Error as exc:
+            logging.error("Migration v11: ошибка обновления адресов заказов: %s", exc, exc_info=True)
+
     def backup_database(self) -> tuple[bool, str]:
         if not self.conn: return False, "Нет подключения к базе данных."
         import time
@@ -707,22 +851,77 @@ class Database:
         except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
 
     # --- Counterparties, Orders, Equipment etc. (existing methods) ---
-    def get_all_counterparties(self): return self.fetchall("SELECT * FROM counterparties ORDER BY name")
-    def get_counterparty_by_id(self, counterparty_id): return self.fetchone("SELECT * FROM counterparties WHERE id = ?", (counterparty_id,))
-    def add_counterparty(self, name, address, contact_person, phone, email, note):
+    def get_all_counterparties(self):
+        counterparties = self.fetchall("SELECT * FROM counterparties ORDER BY name")
+        addresses_map = self._get_counterparty_addresses_map()
+
+        for counterparty in counterparties:
+            addresses = addresses_map.get(counterparty["id"], [])
+            counterparty["addresses"] = addresses
+            default_address = next((a["address"] for a in addresses if a.get("is_default")), counterparty.get("address", ""))
+            counterparty["default_address"] = default_address
+            counterparty["address"] = self._format_addresses_for_display(addresses) if addresses else default_address
+
+        return counterparties
+
+    def get_counterparty_by_id(self, counterparty_id):
+        counterparty = self.fetchone("SELECT * FROM counterparties WHERE id = ?", (counterparty_id,))
+        if not counterparty:
+            return None
+
+        addresses_map = self._get_counterparty_addresses_map([counterparty_id])
+        addresses = addresses_map.get(counterparty_id, [])
+        counterparty["addresses"] = addresses
+        default_address = next((a["address"] for a in addresses if a.get("is_default")), counterparty.get("address", ""))
+        counterparty["default_address"] = default_address
+        counterparty["address"] = self._format_addresses_for_display(addresses) if addresses else default_address
+        return counterparty
+    def add_counterparty(self, name, address, contact_person, phone, email, note, addresses=None):
+        normalized_addresses = self._normalize_addresses(addresses)
+        if not normalized_addresses and address:
+            normalized_addresses = self._normalize_addresses([address])
+        default_address = normalized_addresses[0]["address"] if normalized_addresses else (address or "")
+
         try:
-            self.execute("INSERT INTO counterparties (name, address, contact_person, phone, email, note) VALUES (?, ?, ?, ?, ?, ?)", (name, address, contact_person, phone, email, note))
-            if self.conn: self.conn.commit()
+            if not self.conn:
+                return False, "Нет подключения к БД."
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "INSERT INTO counterparties (name, address, contact_person, phone, email, note) VALUES (?, ?, ?, ?, ?, ?)",
+                    (name, default_address, contact_person, phone, email, note),
+                )
+                counterparty_id = cursor.lastrowid
+                if normalized_addresses:
+                    self._replace_counterparty_addresses(cursor, counterparty_id, normalized_addresses)
             self._log_action(f"Добавлен контрагент: {name}")
             return True, "Контрагент добавлен."
-        except sqlite3.IntegrityError: return False, "Контрагент с таким именем уже существует."
-    def update_counterparty(self, c_id, name, address, contact_person, phone, email, note):
+        except sqlite3.IntegrityError:
+            return False, "Контрагент с таким именем уже существует."
+
+    def update_counterparty(self, c_id, name, address, contact_person, phone, email, note, addresses=None):
+        normalized_addresses = self._normalize_addresses(addresses)
+        if not normalized_addresses and address:
+            normalized_addresses = self._normalize_addresses([address])
+        default_address = normalized_addresses[0]["address"] if normalized_addresses else (address or "")
+
         try:
-            self.execute("UPDATE counterparties SET name=?, address=?, contact_person=?, phone=?, email=?, note=? WHERE id=?", (name, address, contact_person, phone, email, note, c_id))
-            if self.conn: self.conn.commit()
+            if not self.conn:
+                return False, "Нет подключения к БД."
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "UPDATE counterparties SET name=?, address=?, contact_person=?, phone=?, email=?, note=? WHERE id=?",
+                    (name, default_address, contact_person, phone, email, note, c_id),
+                )
+                if normalized_addresses:
+                    self._replace_counterparty_addresses(cursor, c_id, normalized_addresses)
+                else:
+                    cursor.execute("DELETE FROM counterparty_addresses WHERE counterparty_id = ?", (c_id,))
             self._log_action(f"Обновлён контрагент #{c_id}: {name}")
             return True, "Данные контрагента обновлены."
-        except sqlite3.IntegrityError: return False, "Контрагент с таким именем уже существует."
+        except sqlite3.IntegrityError:
+            return False, "Контрагент с таким именем уже существует."
     def delete_counterparty(self, c_id):
         if self.fetchone("SELECT 1 FROM orders WHERE counterparty_id = ?", (c_id,)): return False, "Удаление невозможно: у контрагента есть заказы."
         try:
@@ -737,8 +936,19 @@ class Database:
         except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
     def get_all_orders_with_counterparty(self):
         query = """
-            SELECT o.id, c.name as counterparty_name, o.invoice_no, o.invoice_date, o.delivery_date, o.created_at, o.status, o.comment
-            FROM orders o JOIN counterparties c ON o.counterparty_id = c.id ORDER BY o.created_at DESC
+            SELECT o.id,
+                   c.name as counterparty_name,
+                   o.invoice_no,
+                   o.invoice_date,
+                   o.delivery_date,
+                   o.delivery_address,
+                   o.created_at,
+                   o.status,
+                   o.comment,
+                   c.address as counterparty_address
+            FROM orders o
+            JOIN counterparties c ON o.counterparty_id = c.id
+            ORDER BY o.created_at DESC
         """
         return self.fetchall(query)
     def get_order_details(self, order_id): return self.fetchone("SELECT * FROM orders WHERE id = ?", (order_id,))
@@ -749,10 +959,10 @@ class Database:
             with self.conn:
                 cursor = self.conn.cursor()
                 cursor.execute(
-                    """INSERT INTO orders (counterparty_id, invoice_no, invoice_date, delivery_date, status, comment)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    """INSERT INTO orders (counterparty_id, invoice_no, invoice_date, delivery_date, delivery_address, status, comment)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
                     (order_data['counterparty_id'], order_data['invoice_no'], order_data['invoice_date'],
-                     order_data['delivery_date'], order_data['status'], order_data['comment'])
+                     order_data['delivery_date'], order_data.get('delivery_address'), order_data['status'], order_data['comment'])
                 )
                 order_id = cursor.lastrowid
                 for item in items_data:
@@ -779,10 +989,10 @@ class Database:
             with self.conn:
                 cursor = self.conn.cursor()
                 cursor.execute(
-                    """UPDATE orders SET counterparty_id=?, invoice_no=?, invoice_date=?, delivery_date=?, status=?, comment=?
+                    """UPDATE orders SET counterparty_id=?, invoice_no=?, invoice_date=?, delivery_date=?, delivery_address=?, status=?, comment=?
                        WHERE id=?""",
                     (order_data['counterparty_id'], order_data['invoice_no'], order_data['invoice_date'],
-                     order_data['delivery_date'], order_data['status'], order_data['comment'], order_id)
+                     order_data['delivery_date'], order_data.get('delivery_address'), order_data['status'], order_data['comment'], order_id)
                 )
                 cursor.execute("DELETE FROM order_items WHERE order_id=?", (order_id,))
                 for item in items_data:

@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtGui import QStandardItemModel, QStandardItem
 
 from .part_dialog import PartDialog
+from .utils import apply_table_compact_style
 
 class AttachPartDialog(QDialog):
     def __init__(self, db, event_bus, equipment_id, parent=None):
@@ -40,6 +41,7 @@ class AttachPartDialog(QDialog):
         self.table_model = QStandardItemModel(self)
         self.table_model.setHorizontalHeaderLabels(["Наименование", "Артикул", "На складе, шт."])
         self.table_view.setModel(self.table_model)
+        apply_table_compact_style(self.table_view)
         self.layout.addWidget(self.table_view)
 
         qty_layout = QHBoxLayout()

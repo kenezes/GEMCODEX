@@ -1,4 +1,5 @@
 import logging
+from ui.utils import apply_table_compact_style
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QLineEdit, QTableView, QHeaderView, 
     QDialogButtonBox
@@ -81,6 +82,7 @@ class PartSelectionDialog(QDialog):
         self.table_view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table_view.horizontalHeader().setStretchLastSection(True)
         self.table_view.verticalHeader().setVisible(False)
+        apply_table_compact_style(self.table_view)
         self.table_view.doubleClicked.connect(self.accept_selection)
 
         self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
