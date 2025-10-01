@@ -2213,7 +2213,11 @@ class Database:
 
     def get_due_periodic_tasks(self, within_days: int = 7) -> list[dict[str, Any]]:
         tasks = self.get_all_periodic_tasks()
-        return [task for task in tasks if task.get('days_until_due', 0) <= within_days]
+        return [
+            task
+            for task in tasks
+            if task.get('days_until_due') is not None and task['days_until_due'] < within_days
+        ]
 
     def get_periodic_task_by_id(self, task_id: int) -> Optional[dict[str, Any]]:
         query = """
@@ -2397,7 +2401,13 @@ class Database:
             logging.error("Ошибка при удалении периодических работ: %s", exc, exc_info=True)
             return False, f"Ошибка базы данных: {exc}"
 
-    def complete_periodic_task(self, task_id: int, completion_date: Optional[str] = None):
+    def _update_periodic_task_completion(
+        self,
+        task_id: int,
+        completion_date: Optional[str],
+        log_template: str,
+        success_message: str,
+    ):
         if not self.conn:
             return False, "Нет подключения к базе данных.", {}
 
@@ -2415,16 +2425,43 @@ class Database:
             if not task:
                 return False, "Периодическая работа не найдена.", {}
 
-            self._log_action(
-                f"Отмечено выполнение периодической работы #{task_id}: '{task['title']}'"
-            )
-            return True, "Дата выполнения обновлена.", {
+            self._log_action(log_template.format(task_id=task_id, title=task['title']))
+            return True, success_message, {
                 'next_due_date': task.get('next_due_date'),
                 'days_until_due': task.get('days_until_due'),
             }
         except sqlite3.Error as exc:
-            logging.error("Ошибка при обновлении даты выполнения периодической работы #%s: %s", task_id, exc, exc_info=True)
+            logging.error(
+                "Ошибка при обновлении даты выполнения периодической работы #%s: %s",
+                task_id,
+                exc,
+                exc_info=True,
+            )
             return False, f"Ошибка базы данных: {exc}", {}
+
+    def complete_periodic_task(self, task_id: int, completion_date: Optional[str] = None):
+        return self._update_periodic_task_completion(
+            task_id,
+            completion_date,
+            "Отмечено выполнение периодической работы #{task_id}: '{title}'",
+            "Дата выполнения обновлена.",
+        )
+
+    def cancel_periodic_task(self, task_id: int, completion_date: Optional[str] = None):
+        return self._update_periodic_task_completion(
+            task_id,
+            completion_date,
+            "Отменено выполнение периодической работы #{task_id}: '{title}'",
+            "Периодическая работа отменена.",
+        )
+
+    def pause_periodic_task(self, task_id: int, completion_date: Optional[str] = None):
+        return self._update_periodic_task_completion(
+            task_id,
+            completion_date,
+            "Периодическая работа #{task_id} отмечена как остановленная: '{title}'",
+            "Периодическая работа поставлена на стоп.",
+        )
 
     # --- Knives / Sharpening ---
     def get_all_sharpening_items(self):
@@ -2852,7 +2889,38 @@ class Database:
             "history.entry_id DESC"
         )
 
-        return self.fetchall(query, tuple(params))
+        rows = self.fetchall(query, tuple(params))
+
+        cleaned_rows: list[dict[str, Any]] = []
+        seen_status_entries: set[tuple[Any, ...]] = set()
+        phrases_to_remove = [
+            "(состояние заточки изменено вручную)",
+            "(состояние установки изменено вручную)",
+        ]
+
+        for row in rows:
+            row_dict = dict(row)
+            if row_dict.get('entry_type') == 'status':
+                key = (
+                    row_dict.get('part_id'),
+                    row_dict.get('event_date'),
+                    row_dict.get('event_time'),
+                    row_dict.get('from_status'),
+                    row_dict.get('to_status'),
+                )
+                if key in seen_status_entries:
+                    continue
+                seen_status_entries.add(key)
+
+                comment = row_dict.get('comment') or ""
+                for phrase in phrases_to_remove:
+                    comment = comment.replace(phrase, "")
+                comment = " ".join(comment.strip().split())
+                row_dict['comment'] = comment
+
+            cleaned_rows.append(row_dict)
+
+        return cleaned_rows
 
     def delete_knife_sharpen_entry(self, entry_id):
         if not self.conn:

@@ -226,7 +226,7 @@ class TableModel(QAbstractTableModel):
     def __init__(self, data=None, parent=None):
         super().__init__(parent)
         self._data = data or []
-        self._headers = ['Наименование', 'Артикул', 'Остаток, шт.', 'Минимум, шт.', 'Цена', 'Категория', 'Оборудование', 'Папка']
+        self._headers = ['Наименование', 'Артикул', 'Остаток, шт.', 'Минимум, шт.', 'Цена', 'Категория', 'Оборудование', '']
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._data)

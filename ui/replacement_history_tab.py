@@ -4,7 +4,6 @@ from PySide6.QtWidgets import (
     QTableView,
     QHeaderView,
     QAbstractItemView,
-    QGroupBox,
     QDateEdit,
     QComboBox,
     QPushButton,
@@ -282,8 +281,9 @@ class ReplacementsHistoryView(QWidget):
     def _setup_ui(self):
         main_layout = QVBoxLayout(self)
 
-        filters_group = QGroupBox("Фильтры")
-        filters_layout = QHBoxLayout()
+        filters_container = QWidget()
+        filters_layout = QHBoxLayout(filters_container)
+        filters_layout.setContentsMargins(0, 0, 0, 0)
         filters_layout.setSpacing(16)
 
         self.start_date_edit = QDateEdit()
@@ -333,8 +333,6 @@ class ReplacementsHistoryView(QWidget):
         filters_layout.addStretch()
         filters_layout.addWidget(self.delete_button)
 
-        filters_group.setLayout(filters_layout)
-
         self.model = ReplacementsTableModel()
         self.proxy_model = QSortFilterProxyModel()
         self.proxy_model.setSourceModel(self.model)
@@ -354,7 +352,7 @@ class ReplacementsHistoryView(QWidget):
 
         apply_table_compact_style(self.table)
 
-        main_layout.addWidget(filters_group)
+        main_layout.addWidget(filters_container)
         main_layout.addWidget(self.table)
         self.setLayout(main_layout)
 
@@ -463,8 +461,9 @@ class OrdersHistoryView(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        filters_group = QGroupBox("Фильтры")
-        filters_layout = QHBoxLayout()
+        filters_container = QWidget()
+        filters_layout = QHBoxLayout(filters_container)
+        filters_layout.setContentsMargins(0, 0, 0, 0)
         filters_layout.setSpacing(16)
 
         self.start_date_edit = QDateEdit()
@@ -508,8 +507,6 @@ class OrdersHistoryView(QWidget):
         filters_layout.addWidget(build_filter_block("Контрагент", self.counterparty_combo))
         filters_layout.addStretch()
 
-        filters_group.setLayout(filters_layout)
-
         self.model = OrdersHistoryTableModel(self)
         self.proxy_model = QSortFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.model)
@@ -524,7 +521,7 @@ class OrdersHistoryView(QWidget):
         header.setStretchLastSection(False)
         apply_table_compact_style(self.table)
 
-        layout.addWidget(filters_group)
+        layout.addWidget(filters_container)
         layout.addWidget(self.table)
 
     def _load_counterparties(self):
@@ -563,8 +560,9 @@ class TasksHistoryView(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        filters_group = QGroupBox("Фильтры")
-        filters_layout = QHBoxLayout()
+        filters_container = QWidget()
+        filters_layout = QHBoxLayout(filters_container)
+        filters_layout.setContentsMargins(0, 0, 0, 0)
         filters_layout.setSpacing(16)
 
         self.start_date_edit = QDateEdit()
@@ -610,8 +608,6 @@ class TasksHistoryView(QWidget):
         filters_layout.addWidget(block("Оборудование", self.equipment_combo))
         filters_layout.addStretch()
 
-        filters_group.setLayout(filters_layout)
-
         self.model = TasksHistoryTableModel(self)
         self.proxy_model = QSortFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.model)
@@ -626,7 +622,7 @@ class TasksHistoryView(QWidget):
         header.setStretchLastSection(False)
         apply_table_compact_style(self.table)
 
-        layout.addWidget(filters_group)
+        layout.addWidget(filters_container)
         layout.addWidget(self.table)
 
     def _load_filters(self):
@@ -674,8 +670,9 @@ class KnifeOperationsHistoryView(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        filters_group = QGroupBox("Фильтры")
-        filters_layout = QHBoxLayout()
+        filters_container = QWidget()
+        filters_layout = QHBoxLayout(filters_container)
+        filters_layout.setContentsMargins(0, 0, 0, 0)
         filters_layout.setSpacing(16)
 
         self.start_date_edit = QDateEdit()
@@ -719,8 +716,6 @@ class KnifeOperationsHistoryView(QWidget):
         filters_layout.addWidget(block("Комплект", self.part_combo))
         filters_layout.addStretch()
 
-        filters_group.setLayout(filters_layout)
-
         self.model = KnifeOperationsHistoryModel(self)
         self.proxy_model = QSortFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.model)
@@ -735,7 +730,7 @@ class KnifeOperationsHistoryView(QWidget):
         header.setStretchLastSection(False)
         apply_table_compact_style(self.table)
 
-        layout.addWidget(filters_group)
+        layout.addWidget(filters_container)
         layout.addWidget(self.table)
 
     def _load_parts(self):
