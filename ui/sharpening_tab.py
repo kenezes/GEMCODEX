@@ -65,6 +65,8 @@ class SharpeningTableModel(QAbstractTableModel):
         row_data = self._data[index.row()]
         column = index.column()
 
+        states_text = self._format_states(row_data)
+
         if role == Qt.DisplayRole:
             if column == 0:
                 return row_data["name"]
@@ -81,14 +83,7 @@ class SharpeningTableModel(QAbstractTableModel):
                 equipment = row_data.get("equipment_list")
                 return equipment or ""
             if column == 6:
-                sharp_state = row_data.get("sharp_state")
-                install_state = row_data.get("installation_state")
-                states: list[str] = []
-                if sharp_state:
-                    states.append("Заточен" if sharp_state == "заточен" else "Затуплен")
-                if install_state:
-                    states.append("Установлен" if install_state == "установлен" else "Снят")
-                return ", ".join(states)
+                return ""
 
         if role == Qt.UserRole:
             return row_data.get("id")
@@ -96,7 +91,21 @@ class SharpeningTableModel(QAbstractTableModel):
         if role == Qt.UserRole + 1:
             return row_data
 
+        if role == Qt.ToolTipRole and column == SharpeningTableModel.ACTION_COLUMN:
+            return states_text or None
+
         return None
+
+    @staticmethod
+    def _format_states(row_data: dict) -> str:
+        sharp_state = row_data.get("sharp_state")
+        install_state = row_data.get("installation_state")
+        states: list[str] = []
+        if sharp_state:
+            states.append("Заточен" if sharp_state == "заточен" else "Затуплен")
+        if install_state:
+            states.append("Установлен" if install_state == "установлен" else "Снят")
+        return ", ".join(states)
 
     def headerData(self, section: int, orientation: Qt.Orientation, role: int = Qt.DisplayRole):  # type: ignore[override]
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:

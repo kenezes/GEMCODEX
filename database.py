@@ -2901,22 +2901,23 @@ class Database:
         for row in rows:
             row_dict = dict(row)
             if row_dict.get('entry_type') == 'status':
-                key = (
-                    row_dict.get('part_id'),
-                    row_dict.get('event_date'),
-                    row_dict.get('event_time'),
-                    row_dict.get('from_status'),
-                    row_dict.get('to_status'),
-                )
-                if key in seen_status_entries:
-                    continue
-                seen_status_entries.add(key)
-
                 comment = row_dict.get('comment') or ""
                 for phrase in phrases_to_remove:
                     comment = comment.replace(phrase, "")
                 comment = " ".join(comment.strip().split())
                 row_dict['comment'] = comment
+
+                key = (
+                    row_dict.get('part_id'),
+                    row_dict.get('event_date'),
+                    row_dict.get('event_time') or "",
+                    row_dict.get('from_status') or "",
+                    row_dict.get('to_status') or "",
+                    comment,
+                )
+                if key in seen_status_entries:
+                    continue
+                seen_status_entries.add(key)
 
             cleaned_rows.append(row_dict)
 

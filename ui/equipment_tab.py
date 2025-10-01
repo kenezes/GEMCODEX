@@ -75,10 +75,15 @@ class EquipmentTab(QWidget):
 
         left_layout.addLayout(tree_buttons_layout)
 
-        self.add_equipment_main_button = QPushButton("Добавить оборудование")
+        self.add_equipment_main_button = _create_tool_button(
+            QStyle.SP_FileDialogNewFolder, "Добавить оборудование"
+        )
         self.add_equipment_main_button.setCursor(Qt.PointingHandCursor)
+        self.add_equipment_main_button.setAutoRaise(False)
+        self.add_equipment_main_button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        self.add_equipment_main_button.setIconSize(QSize(32, 32))
         self.add_equipment_main_button.clicked.connect(self.add_equipment)
-        left_layout.addWidget(self.add_equipment_main_button)
+        left_layout.addWidget(self.add_equipment_main_button, 0, Qt.AlignLeft)
 
         self.only_requires_equipment_checkbox = QCheckBox("Только оборудование с требующей замену запчастью")
         self.only_requires_equipment_checkbox.setToolTip(
@@ -207,7 +212,7 @@ class EquipmentTab(QWidget):
                 if self._add_equipment_node(cat_item, eq, equipment_by_parent, equipment_with_flags, filter_active):
                     has_children = True
 
-            if not has_children:
+            if filter_active and not has_children:
                 index = self.tree.indexOfTopLevelItem(cat_item)
                 self.tree.takeTopLevelItem(index)
 
