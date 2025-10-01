@@ -2,7 +2,7 @@ import sqlite3
 import logging
 from pathlib import Path
 from typing import Any, Optional
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from collections import defaultdict
 
 class Database:
@@ -271,6 +271,13 @@ class Database:
             cursor.execute("PRAGMA user_version = 11;")
             self.conn.commit()
             logging.info("Database migrated to version 11.")
+
+        if user_version < 12:
+            logging.info("Applying migration to version 12...")
+            self._apply_migration_v12()
+            cursor.execute("PRAGMA user_version = 12;")
+            self.conn.commit()
+            logging.info("Database migrated to version 12.")
 
 
     def _apply_migration_v1(self):
@@ -644,6 +651,34 @@ class Database:
             )
         except sqlite3.Error as exc:
             logging.error("Migration v11: ошибка обновления адресов заказов: %s", exc, exc_info=True)
+
+    def _apply_migration_v12(self):
+        """Добавляет таблицу периодических работ."""
+        if not self.conn:
+            return
+
+        cursor = self.conn.cursor()
+
+        try:
+            cursor.executescript(
+                """
+                    CREATE TABLE IF NOT EXISTS periodic_tasks (
+                        id INTEGER PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        equipment_id INTEGER,
+                        equipment_part_id INTEGER,
+                        period_days INTEGER NOT NULL CHECK(period_days > 0),
+                        last_completed_date TEXT,
+                        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d', 'now', 'localtime')),
+                        FOREIGN KEY (equipment_id) REFERENCES equipment(id) ON DELETE SET NULL,
+                        FOREIGN KEY (equipment_part_id) REFERENCES equipment_parts(id) ON DELETE SET NULL
+                    );
+                    CREATE INDEX IF NOT EXISTS periodic_tasks_due_idx
+                        ON periodic_tasks(period_days, last_completed_date);
+                """
+            )
+        except sqlite3.Error as exc:
+            logging.error("Migration v12: ошибка при создании таблицы periodic_tasks: %s", exc, exc_info=True)
 
     def backup_database(self) -> tuple[bool, str]:
         if not self.conn: return False, "Нет подключения к базе данных."
@@ -2006,7 +2041,275 @@ class Database:
         except sqlite3.Error as e:
             logging.error("Ошибка при удалении задачи #%s: %s", task_id, e, exc_info=True)
             return False, f"Ошибка базы данных: {e}", {}
-        
+
+    # --- Periodic Tasks ---
+    @staticmethod
+    def _compute_next_due_date(last_completed: Optional[str], period_days: int) -> date:
+        today = date.today()
+        if period_days <= 0:
+            return today
+
+        if last_completed:
+            try:
+                last_date = datetime.strptime(last_completed, "%Y-%m-%d").date()
+            except ValueError:
+                last_date = today
+        else:
+            last_date = today
+
+        return last_date + timedelta(days=period_days)
+
+    def _prepare_periodic_task_row(self, row: dict[str, Any]) -> dict[str, Any]:
+        period_days = int(row.get('period_days') or 0)
+        last_completed = row.get('last_completed_date')
+        next_due = self._compute_next_due_date(last_completed, period_days)
+        row['next_due_date'] = next_due.isoformat()
+        row['days_until_due'] = (next_due - date.today()).days
+        return row
+
+    def get_all_periodic_tasks(self) -> list[dict[str, Any]]:
+        query = """
+            SELECT
+                pt.id,
+                pt.title,
+                pt.period_days,
+                pt.last_completed_date,
+                pt.equipment_id,
+                pt.equipment_part_id,
+                e.name AS equipment_name,
+                ep.part_id,
+                p.name AS part_name,
+                p.sku AS part_sku
+            FROM periodic_tasks pt
+            LEFT JOIN equipment e ON pt.equipment_id = e.id
+            LEFT JOIN equipment_parts ep ON pt.equipment_part_id = ep.id
+            LEFT JOIN parts p ON ep.part_id = p.id
+        """
+
+        rows = [self._prepare_periodic_task_row(row) for row in self.fetchall(query)]
+        return sorted(
+            rows,
+            key=lambda r: (
+                r.get('next_due_date') or '',
+                (r.get('title') or '').lower(),
+            ),
+        )
+
+    def get_due_periodic_tasks(self, within_days: int = 7) -> list[dict[str, Any]]:
+        tasks = self.get_all_periodic_tasks()
+        return [task for task in tasks if task.get('days_until_due', 0) <= within_days]
+
+    def get_periodic_task_by_id(self, task_id: int) -> Optional[dict[str, Any]]:
+        query = """
+            SELECT
+                pt.id,
+                pt.title,
+                pt.period_days,
+                pt.last_completed_date,
+                pt.equipment_id,
+                pt.equipment_part_id,
+                e.name AS equipment_name,
+                ep.part_id,
+                p.name AS part_name,
+                p.sku AS part_sku
+            FROM periodic_tasks pt
+            LEFT JOIN equipment e ON pt.equipment_id = e.id
+            LEFT JOIN equipment_parts ep ON pt.equipment_part_id = ep.id
+            LEFT JOIN parts p ON ep.part_id = p.id
+            WHERE pt.id = ?
+        """
+
+        row = self.fetchone(query, (task_id,))
+        return self._prepare_periodic_task_row(row) if row else None
+
+    def _resolve_periodic_target(self, cursor: sqlite3.Cursor, equipment_id: Optional[int], equipment_part_id: Optional[int]) -> Optional[int]:
+        resolved_equipment_id = equipment_id
+
+        if equipment_part_id:
+            part_row = cursor.execute(
+                "SELECT equipment_id, part_id FROM equipment_parts WHERE id = ?",
+                (equipment_part_id,),
+            ).fetchone()
+            if not part_row:
+                raise ValueError("Выбранная запчасть больше не привязана к оборудованию.")
+            resolved_equipment_id = part_row["equipment_id"]
+
+        if not resolved_equipment_id and not equipment_part_id:
+            raise ValueError("Выберите аппарат или запчасть.")
+
+        return resolved_equipment_id
+
+    def add_periodic_task(
+        self,
+        title: str,
+        period_days: int,
+        equipment_id: Optional[int],
+        equipment_part_id: Optional[int],
+        last_completed_date: Optional[str],
+    ):
+        if not self.conn:
+            return False, "Нет подключения к базе данных."
+
+        title = (title or "").strip()
+        if not title:
+            return False, "Укажите название работы."
+        if period_days <= 0:
+            return False, "Периодичность должна быть положительным числом."
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                resolved_equipment_id = self._resolve_periodic_target(
+                    cursor,
+                    equipment_id,
+                    equipment_part_id,
+                )
+
+                cursor.execute(
+                    """
+                        INSERT INTO periodic_tasks (
+                            title,
+                            equipment_id,
+                            equipment_part_id,
+                            period_days,
+                            last_completed_date
+                        ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        title,
+                        resolved_equipment_id,
+                        equipment_part_id,
+                        period_days,
+                        last_completed_date,
+                    ),
+                )
+                task_id = cursor.lastrowid
+
+            self._log_action(
+                f"Создана периодическая работа #{task_id}: '{title}' (каждые {period_days} дн.)"
+            )
+            return True, "Периодическая работа создана."
+        except ValueError as exc:
+            return False, str(exc)
+        except sqlite3.Error as exc:
+            logging.error("Ошибка при создании периодической работы: %s", exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}"
+
+    def update_periodic_task(
+        self,
+        task_id: int,
+        title: str,
+        period_days: int,
+        equipment_id: Optional[int],
+        equipment_part_id: Optional[int],
+        last_completed_date: Optional[str],
+    ):
+        if not self.conn:
+            return False, "Нет подключения к базе данных."
+
+        title = (title or "").strip()
+        if not title:
+            return False, "Укажите название работы."
+        if period_days <= 0:
+            return False, "Периодичность должна быть положительным числом."
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                resolved_equipment_id = self._resolve_periodic_target(
+                    cursor,
+                    equipment_id,
+                    equipment_part_id,
+                )
+
+                cursor.execute(
+                    """
+                        UPDATE periodic_tasks
+                        SET title = ?,
+                            equipment_id = ?,
+                            equipment_part_id = ?,
+                            period_days = ?,
+                            last_completed_date = ?
+                        WHERE id = ?
+                    """,
+                    (
+                        title,
+                        resolved_equipment_id,
+                        equipment_part_id,
+                        period_days,
+                        last_completed_date,
+                        task_id,
+                    ),
+                )
+
+            self._log_action(
+                f"Обновлена периодическая работа #{task_id}: '{title}' (каждые {period_days} дн.)"
+            )
+            return True, "Периодическая работа обновлена."
+        except ValueError as exc:
+            return False, str(exc)
+        except sqlite3.Error as exc:
+            logging.error("Ошибка при обновлении периодической работы #%s: %s", task_id, exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}"
+
+    def delete_periodic_tasks(self, task_ids: list[int]):
+        if not self.conn:
+            return False, "Нет подключения к базе данных."
+        if not task_ids:
+            return False, "Не выбраны работы для удаления."
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                placeholders = ",".join("?" for _ in task_ids)
+                titles = cursor.execute(
+                    f"SELECT id, title FROM periodic_tasks WHERE id IN ({placeholders})",
+                    tuple(task_ids),
+                ).fetchall()
+                cursor.execute(
+                    f"DELETE FROM periodic_tasks WHERE id IN ({placeholders})",
+                    tuple(task_ids),
+                )
+
+            if titles:
+                for row in titles:
+                    self._log_action(f"Удалена периодическая работа #{row['id']}: '{row['title']}'")
+            else:
+                self._log_action(f"Удалены периодические работы: {len(task_ids)} шт.")
+            return True, "Работы удалены."
+        except sqlite3.Error as exc:
+            logging.error("Ошибка при удалении периодических работ: %s", exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}"
+
+    def complete_periodic_task(self, task_id: int, completion_date: Optional[str] = None):
+        if not self.conn:
+            return False, "Нет подключения к базе данных.", {}
+
+        completion_date = completion_date or date.today().isoformat()
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    "UPDATE periodic_tasks SET last_completed_date = ? WHERE id = ?",
+                    (completion_date, task_id),
+                )
+
+            task = self.get_periodic_task_by_id(task_id)
+            if not task:
+                return False, "Периодическая работа не найдена.", {}
+
+            self._log_action(
+                f"Отмечено выполнение периодической работы #{task_id}: '{task['title']}'"
+            )
+            return True, "Дата выполнения обновлена.", {
+                'next_due_date': task.get('next_due_date'),
+                'days_until_due': task.get('days_until_due'),
+            }
+        except sqlite3.Error as exc:
+            logging.error("Ошибка при обновлении даты выполнения периодической работы #%s: %s", task_id, exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}", {}
+
     # --- Knives / Sharpening ---
     def get_all_sharpening_items(self):
         query = """

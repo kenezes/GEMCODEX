@@ -130,6 +130,9 @@ class SharpeningActionsWidget(QWidget):
         layout.setContentsMargins(0, 2, 0, 2)
         layout.setSpacing(6)
 
+        self.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        self.setMinimumWidth(160)
+
         self.sharp_button = QPushButton(self)
         self.install_button = QPushButton(self)
         for button in (self.sharp_button, self.install_button):
@@ -233,7 +236,7 @@ class SharpeningTab(QWidget):
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
-        header.setSectionResizeMode(SharpeningTableModel.ACTION_COLUMN, QHeaderView.Stretch)
+        header.setSectionResizeMode(SharpeningTableModel.ACTION_COLUMN, QHeaderView.ResizeToContents)
 
         apply_table_compact_style(self.table_view)
 
@@ -245,6 +248,7 @@ class SharpeningTab(QWidget):
         data = self.db.get_all_sharpening_items()
         self.table_model.load_data(data)
         self._populate_action_widgets()
+        self.table_view.resizeColumnToContents(SharpeningTableModel.ACTION_COLUMN)
 
     def _clear_action_widgets(self):
         for widget in self._action_widgets:
