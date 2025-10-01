@@ -494,14 +494,27 @@ class EquipmentTab(QWidget):
         actions_widget = QWidget()
         actions_layout = QHBoxLayout(actions_widget)
         actions_layout.setContentsMargins(0, 0, 0, 0)
+        actions_layout.setSpacing(4)
 
-        replace_button = QPushButton('Заменить')
+        icon_size = QSize(18, 18)
+
+        def _create_icon_button(icon: QStyle.StandardPixmap, tooltip: str) -> QPushButton:
+            button = QPushButton()
+            button.setIcon(self.style().standardIcon(icon))
+            button.setIconSize(icon_size)
+            button.setToolTip(tooltip)
+            button.setCursor(Qt.PointingHandCursor)
+            button.setFlat(False)
+            button.setFixedSize(30, 26)
+            return button
+
+        replace_button = _create_icon_button(QStyle.SP_BrowserReload, 'Заменить запчасть')
         replace_button.clicked.connect(lambda _, p=part_copy: self.replace_part(p))
 
-        detach_button = QPushButton('Удалить привязку')
+        detach_button = _create_icon_button(QStyle.SP_DialogCancelButton, 'Удалить привязку запчасти')
         detach_button.clicked.connect(lambda _, p=part_copy: self.detach_part(p))
 
-        folder_button = QPushButton('Папка')
+        folder_button = _create_icon_button(QStyle.SP_DirOpenIcon, 'Открыть папку запчасти')
         folder_button.clicked.connect(
             lambda _, pn=part_copy.get('part_name', ''), sku=part_copy.get('part_sku'): self.open_part_folder_location(pn, sku)
         )

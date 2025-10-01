@@ -134,12 +134,22 @@ class TasksTab(QWidget):
                         item.setData(Qt.UserRole, task_id)
                         self.table.setItem(row, col, item)
 
-            action_button = QPushButton("Исполнить задачу")
-            action_button.setStyleSheet(
-                "QPushButton { background-color: #28a745; color: white; }"
-                "QPushButton:hover { background-color: #218838; }"
-            )
-            action_button.setEnabled(task['status'] != 'выполнена')
+            action_button = QPushButton("Выполнить")
+            is_completed = task['status'] == 'выполнена'
+            if is_completed:
+                style = (
+                    "QPushButton { background-color: #2e7d32; color: white; }"
+                    "QPushButton:hover { background-color: #1b5e20; }"
+                    "QPushButton:disabled { background-color: #2e7d32; color: white; }"
+                )
+            else:
+                style = (
+                    "QPushButton { background-color: #c62828; color: white; }"
+                    "QPushButton:hover { background-color: #b71c1c; }"
+                    "QPushButton:disabled { background-color: #c62828; color: white; }"
+                )
+            action_button.setStyleSheet(style)
+            action_button.setEnabled(not is_completed)
             action_button.clicked.connect(lambda _, t_id=task_id: self.complete_task(t_id))
             self.table.setCellWidget(row, 7, action_button)
 
