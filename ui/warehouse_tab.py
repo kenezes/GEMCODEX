@@ -1,14 +1,41 @@
 import logging
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableView,
                              QPushButton, QLineEdit, QComboBox, QAbstractItemView,
-                             QHeaderView, QMessageBox, QMenu)
+                             QHeaderView, QMessageBox, QMenu, QStyledItemDelegate, QStyleOptionButton, QStyle)
 from PySide6.QtCore import (Qt, QAbstractTableModel, QModelIndex,
-                          QSortFilterProxyModel)
+                          QSortFilterProxyModel, Signal, QEvent)
 from PySide6.QtGui import QAction
 
 from .part_dialog import PartDialog
 from .category_manager_dialog import CategoryManagerDialog
-from .utils import apply_table_compact_style
+from .utils import apply_table_compact_style, open_part_folder
+
+
+class FolderButtonDelegate(QStyledItemDelegate):
+    """Рисует кнопку "Папка" и обрабатывает клики по ней."""
+
+    clicked = Signal(QModelIndex)
+
+    def paint(self, painter, option, index):  # type: ignore[override]
+        button_option = QStyleOptionButton()
+        button_option.rect = option.rect.adjusted(4, 6, -4, -6)
+        button_option.text = "Папка"
+        button_option.state = QStyle.State_Enabled
+        if option.state & QStyle.State_MouseOver:
+            button_option.state |= QStyle.State_MouseOver
+        option.widget.style().drawControl(QStyle.CE_PushButton, button_option, painter, option.widget)
+
+    def editorEvent(self, event, model, option, index):  # type: ignore[override]
+        if event.type() == QEvent.MouseButtonPress and option.rect.contains(event.pos()):
+            if hasattr(event, 'button') and event.button() != Qt.LeftButton:
+                return False
+            return True
+        if event.type() == QEvent.MouseButtonRelease and option.rect.contains(event.pos()):
+            if hasattr(event, 'button') and event.button() != Qt.LeftButton:
+                return False
+            self.clicked.emit(index)
+            return True
+        return False
 
 class WarehouseTab(QWidget):
     def __init__(self, db, event_bus, parent=None):
@@ -54,11 +81,11 @@ class WarehouseTab(QWidget):
         # Таблица
         self.table_view = QTableView()
         self.table_model = TableModel()
-        
+
         self.proxy_model = CustomSortFilterProxyModel(self.db, self)
         self.proxy_model.setSourceModel(self.table_model)
         self.proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
-        
+
         self.table_view.setModel(self.proxy_model)
         self._setup_table()
         layout.addWidget(self.table_view)
@@ -79,6 +106,11 @@ class WarehouseTab(QWidget):
         header.setStretchLastSection(False)
 
         apply_table_compact_style(self.table_view)
+
+        self.folder_delegate = FolderButtonDelegate(self.table_view)
+        self.folder_delegate.clicked.connect(self.open_part_folder_from_table)
+        self.table_view.setItemDelegateForColumn(TableModel.FOLDER_COLUMN, self.folder_delegate)
+        self.table_view.setColumnWidth(TableModel.FOLDER_COLUMN, 100)
 
     def load_categories(self):
         current_cat = self.category_filter.currentData()
@@ -102,6 +134,15 @@ class WarehouseTab(QWidget):
         self.table_model.set_data(parts_data)
         self.filter_data() # Применяем фильтры после обновления
         logging.info("Warehouse data refreshed.")
+
+    def open_part_folder_from_table(self, proxy_index: QModelIndex):
+        source_index = self.proxy_model.mapToSource(proxy_index)
+        row_data = self.table_model.get_row(source_index.row())
+        if not row_data:
+            return
+        name = row_data.get('name', '')
+        sku = row_data.get('sku', '')
+        open_part_folder(name or '', sku or '')
 
     def filter_data(self):
         search_text = self.search_input.text()
@@ -170,10 +211,12 @@ class WarehouseTab(QWidget):
 
 
 class TableModel(QAbstractTableModel):
+    FOLDER_COLUMN = 7
+
     def __init__(self, data=None, parent=None):
         super().__init__(parent)
         self._data = data or []
-        self._headers = ['Наименование', 'Артикул', 'Остаток, шт.', 'Минимум, шт.', 'Цена', 'Категория', 'Оборудование']
+        self._headers = ['Наименование', 'Артикул', 'Остаток, шт.', 'Минимум, шт.', 'Цена', 'Категория', 'Оборудование', 'Папка']
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._data)
@@ -196,12 +239,18 @@ class TableModel(QAbstractTableModel):
             if col == 4: return f"{row_data.get('price', 0):.2f}"
             if col == 5: return row_data.get('category_name')
             if col == 6: return row_data.get('equipment_list', 'нет')
-        
+            if col == self.FOLDER_COLUMN: return "Папка"
+
         if role == Qt.UserRole:
             return row_data.get('id')
 
+        if role == Qt.UserRole + 1:
+            return row_data
+
         if role == Qt.TextAlignmentRole:
             if col in [2, 3, 4]:
+                return Qt.AlignCenter
+            if col == self.FOLDER_COLUMN:
                 return Qt.AlignCenter
 
         return None
@@ -220,6 +269,11 @@ class TableModel(QAbstractTableModel):
         if not index.isValid():
             return None
         return self.data(index, role=Qt.UserRole)
+
+    def get_row(self, row: int):
+        if 0 <= row < len(self._data):
+            return self._data[row]
+        return None
 
 class CustomSortFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, db=None, parent=None):

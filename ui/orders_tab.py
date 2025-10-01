@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QToolBar, QTableView, QAbst
                              QHeaderView, QMessageBox, QCheckBox, QHBoxLayout, QMenu, QPushButton, QSizePolicy,
                              QLabel, QLineEdit, QStyledItemDelegate, QStyleOptionButton, QStyle)
 from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, Signal, QEvent, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
+from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication, QColor, QPalette
 
 from .order_dialog import OrderDialog
 from ui.utils import db_string_to_ui_string, apply_table_compact_style
@@ -17,9 +17,14 @@ class ActionButtonDelegate(QStyledItemDelegate):
 
     def paint(self, painter, option, index):  # type: ignore[override]
         button_option = QStyleOptionButton()
-        button_option.rect = option.rect.adjusted(4, 4, -4, -4)
+        button_option.rect = option.rect.adjusted(4, 6, -4, -6)
         button_option.text = "Сообщить"
         button_option.state = QStyle.State_Enabled
+        palette = QPalette(option.palette)
+        is_notified = bool(index.data(Qt.UserRole + 2))
+        palette.setColor(QPalette.Button, QColor("#2e7d32") if is_notified else QColor("#c62828"))
+        palette.setColor(QPalette.ButtonText, Qt.white)
+        button_option.palette = palette
         if option.state & QStyle.State_MouseOver:
             button_option.state |= QStyle.State_MouseOver
         option.widget.style().drawControl(QStyle.CE_PushButton, button_option, painter, option.widget)
@@ -57,6 +62,7 @@ class OrdersTableModel(QAbstractTableModel):
             "",
         ]
         self._data = []
+        self._notified_orders: set[int] = set()
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._data)
@@ -67,7 +73,7 @@ class OrdersTableModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
-        
+
         row_data = self._data[index.row()]
         col = index.column()
 
@@ -91,6 +97,9 @@ class OrdersTableModel(QAbstractTableModel):
         if role == Qt.UserRole + 1:
             return row_data
 
+        if role == Qt.UserRole + 2 and index.column() == self.ACTION_COLUMN:
+            return row_data['id'] in self._notified_orders
+
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
@@ -108,12 +117,23 @@ class OrdersTableModel(QAbstractTableModel):
     def load_data(self, data):
         self.beginResetModel()
         self._data = data
+        self._notified_orders.clear()
         self.endResetModel()
 
     def get_row(self, row_index: int) -> dict | None:
         if 0 <= row_index < len(self._data):
             return self._data[row_index]
         return None
+
+    def mark_notified(self, order_id: int):
+        if order_id in self._notified_orders:
+            return
+        for row_index, row in enumerate(self._data):
+            if row.get('id') == order_id:
+                self._notified_orders.add(order_id)
+                model_index = self.index(row_index, self.ACTION_COLUMN)
+                self.dataChanged.emit(model_index, model_index, [Qt.DisplayRole])
+                break
 
 class OrdersFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None):
@@ -356,4 +376,7 @@ class OrdersTab(QWidget):
         url = QUrl(f"https://wa.me/{digits_only}?text={quote(message, safe='')}")
         if not QDesktopServices.openUrl(url):
             QMessageBox.warning(self, "Открытие WhatsApp", "Не удалось открыть чат WhatsApp.")
+        order_id = row_data.get('id')
+        if order_id is not None:
+            self.base_model.mark_notified(order_id)
 
