@@ -8,9 +8,34 @@ from tempfile import TemporaryDirectory
 from typing import Optional
 
 
-def _iter_application_files(app_root: Path):
+def _path_is_relative_to(path: Path, other: Path) -> bool:
+    """Return True if *path* is located inside *other* (inclusive)."""
+
+    try:
+        path.relative_to(other)
+        return True
+    except ValueError:
+        return False
+
+
+def _iter_application_files(app_root: Path, *, exclude: Optional[set[Path]] = None):
+    exclude = {p.resolve() for p in (exclude or set())}
+
     for root, dirs, files in os.walk(app_root):
-        root_path = Path(root)
+        root_path = Path(root).resolve()
+
+        if any(_path_is_relative_to(root_path, item) for item in exclude):
+            dirs[:] = []
+            continue
+
+        dirs[:] = [
+            name for name in dirs
+            if not any(
+                _path_is_relative_to((root_path / name).resolve(), item)
+                for item in exclude
+            )
+        ]
+
         relative_root = root_path.relative_to(app_root)
 
         if not files and not dirs:
@@ -55,11 +80,15 @@ def create_application_backup(app_root: Path, backup_dir: Path):
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     archive_name = f"app_backup_{timestamp}.zip"
 
+    exclude: set[Path] = set()
+    if _path_is_relative_to(backup_dir, app_root):
+        exclude.add(backup_dir)
+
     try:
         with TemporaryDirectory() as tmp_dir:
             temp_archive_path = Path(tmp_dir) / archive_name
             with zipfile.ZipFile(temp_archive_path, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
-                for archive_name_part, file_path in _iter_application_files(app_root):
+                for archive_name_part, file_path in _iter_application_files(app_root, exclude=exclude):
                     if file_path is None:
                         if archive_name_part == Path('.'):
                             continue
