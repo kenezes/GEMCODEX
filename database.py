@@ -2958,3 +2958,74 @@ class Database:
             logging.error("Ошибка удаления записи истории заточек", exc_info=True)
             return False, f"Ошибка базы данных: {exc}"
 
+    def delete_knife_status_entry(self, entry_id: int):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                row = cursor.execute(
+                    "SELECT part_id FROM knife_status_log WHERE id = ?",
+                    (entry_id,),
+                ).fetchone()
+                if not row:
+                    return False, "Запись не найдена."
+
+                part_id = row["part_id"]
+                cursor.execute("DELETE FROM knife_status_log WHERE id = ?", (entry_id,))
+
+                cursor.execute(
+                    """
+                        SELECT to_status, changed_at
+                        FROM knife_status_log
+                        WHERE part_id = ?
+                        ORDER BY changed_at DESC
+                        LIMIT 1
+                    """,
+                    (part_id,),
+                )
+                latest = cursor.fetchone()
+
+                if latest:
+                    latest_status = latest["to_status"]
+                    changed_at = latest["changed_at"]
+                    sharp_state = self._fallback_sharp_state(None, latest_status)
+                    installation_state = self._fallback_installation_state(None, latest_status)
+                    work_started_at = None
+                    if latest_status == "в работе" and changed_at:
+                        work_started_at = changed_at.split(" ")[0]
+                else:
+                    latest_status = "наточен"
+                    sharp_state = "заточен"
+                    installation_state = "снят"
+                    work_started_at = None
+
+                combined_status = latest_status
+                if combined_status not in {"в работе", "наточен", "затуплен"}:
+                    combined_status = self._combined_status(sharp_state, installation_state)
+
+                cursor.execute(
+                    "INSERT OR IGNORE INTO knife_tracking (part_id) VALUES (?)",
+                    (part_id,),
+                )
+                cursor.execute(
+                    """
+                        UPDATE knife_tracking
+                        SET status = ?,
+                            sharp_state = ?,
+                            installation_state = ?,
+                            work_started_at = ?
+                        WHERE part_id = ?
+                    """,
+                    (combined_status, sharp_state, installation_state, work_started_at, part_id),
+                )
+
+            self._log_action(
+                f"Удалена запись изменения статуса #{entry_id} для комплекта #{part_id}"
+            )
+            return True, "Запись удалена."
+        except sqlite3.Error as exc:
+            logging.error("Ошибка удаления записи статуса ножа", exc_info=True)
+            return False, f"Ошибка базы данных: {exc}"
+
