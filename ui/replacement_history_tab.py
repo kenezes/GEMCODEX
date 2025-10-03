@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex, QDate
 
 from .edit_replacement_dialog import EditReplacementDialog
+from .order_dialog import OrderDialog
+from .task_dialog import TaskDialog
 from .utils import db_string_to_ui_string, qdate_to_db_string, apply_table_compact_style
 
 
@@ -267,6 +269,11 @@ class KnifeOperationsHistoryModel(QAbstractTableModel):
         self._data = rows
         self.endResetModel()
 
+    def get_entry(self, row: int) -> dict | None:
+        if 0 <= row < len(self._data):
+            return self._data[row]
+        return None
+
 
 class ReplacementsHistoryView(QWidget):
     def __init__(self, db, event_bus, parent=None):
@@ -297,8 +304,8 @@ class ReplacementsHistoryView(QWidget):
         self.part_category_combo = QComboBox()
         self.equipment_combo = QComboBox()
 
-        self.delete_button = QPushButton("Удалить запись")
-        self.delete_button.clicked.connect(self.delete_selected_replacement)
+        self.delete_button = QPushButton("Удалить выбранные")
+        self.delete_button.clicked.connect(self.delete_selected_replacements)
 
         period_container = QWidget()
         period_container_layout = QVBoxLayout(period_container)
@@ -340,6 +347,7 @@ class ReplacementsHistoryView(QWidget):
         self.table = QTableView()
         self.table.setModel(self.proxy_model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSortingEnabled(True)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -355,6 +363,8 @@ class ReplacementsHistoryView(QWidget):
         main_layout.addWidget(filters_container)
         main_layout.addWidget(self.table)
         self.setLayout(main_layout)
+        self.table.selectionModel().selectionChanged.connect(self._update_delete_button_state)
+        self._update_delete_button_state()
 
     def _load_combobox_data(self):
         self.part_category_combo.clear()
@@ -385,67 +395,99 @@ class ReplacementsHistoryView(QWidget):
         data = self.db.get_all_replacements_filtered(start_date, end_date, part_category_id, equipment_id)
         self.model.load_data(data)
 
-    def _selected_source_index(self):
+    def _selected_source_indexes(self):
         selection_model = self.table.selectionModel()
         if not selection_model:
-            return None
+            return []
         selected_rows = selection_model.selectedRows()
-        if not selected_rows:
-            return None
-        proxy_index = selected_rows[0]
-        return self.proxy_model.mapToSource(proxy_index)
+        return [self.proxy_model.mapToSource(index) for index in selected_rows]
 
-    def get_selected_replacement_id(self):
-        source_index = self._selected_source_index()
-        if source_index:
-            return self.model.data(source_index, Qt.UserRole)
-        return None
+    def get_selected_replacement_ids(self):
+        ids = []
+        for source_index in self._selected_source_indexes():
+            replacement_id = self.model.data(source_index, Qt.UserRole)
+            if replacement_id:
+                ids.append(replacement_id)
+        return ids
+
+    def _update_delete_button_state(self):
+        has_selection = bool(self.get_selected_replacement_ids())
+        self.delete_button.setEnabled(has_selection)
 
     def edit_selected_replacement(self):
-        replacement_id = self.get_selected_replacement_id()
+        ids = self.get_selected_replacement_ids()
+        replacement_id = ids[0] if ids else None
         if replacement_id:
             dialog = EditReplacementDialog(self.db, self.event_bus, replacement_id, self)
             dialog.exec()
         else:
             QMessageBox.information(self, "Внимание", "Выберите запись для редактирования.")
 
-    def delete_selected_replacement(self):
-        replacement_id = self.get_selected_replacement_id()
-        if not replacement_id:
+    def delete_selected_replacements(self):
+        replacement_ids = self.get_selected_replacement_ids()
+        if not replacement_ids:
             QMessageBox.warning(self, "Внимание", "Выберите запись для удаления.")
             return
+
+        count = len(replacement_ids)
+        if count == 1:
+            prompt = (
+                "Вы уверены, что хотите удалить выбранную запись из истории?\n\n"
+                "<b>Внимание:</b> это действие НЕ вернёт запчасть на склад."
+            )
+        else:
+            prompt = (
+                f"Удалить {count} записей из истории замен?\n\n"
+                "<b>Внимание:</b> это действие НЕ вернёт запчасти на склад."
+            )
 
         reply = QMessageBox.question(
             self,
             "Подтверждение удаления",
-            "Вы уверены, что хотите удалить эту запись из истории?\n\n"
-            "<b>Внимание:</b> это действие НЕ вернет запчасть на склад.",
+            prompt,
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
 
         if reply == QMessageBox.Yes:
-            success, message = self.db.delete_replacement(replacement_id)
-            if success:
-                QMessageBox.information(self, "Успех", message)
+            success_count = 0
+            errors: list[str] = []
+            for replacement_id in replacement_ids:
+                success, message = self.db.delete_replacement(replacement_id)
+                if success:
+                    success_count += 1
+                else:
+                    errors.append(message)
+
+            if success_count:
                 self.event_bus.emit("replacements.changed")
-            else:
-                QMessageBox.critical(self, "Ошибка", message)
+                self.refresh_data()
+                info_message = (
+                    "Удалена запись из истории замен." if success_count == 1 else f"Удалено записей: {success_count}."
+                )
+                QMessageBox.information(self, "Успех", info_message)
+
+            if errors:
+                error_text = "\n".join(dict.fromkeys(errors))
+                QMessageBox.critical(self, "Ошибка", error_text)
 
     def create_context_menu(self, position):
-        if not self.get_selected_replacement_id():
+        selected_ids = self.get_selected_replacement_ids()
+        if not selected_ids:
             return
 
         menu = QMenu()
-        edit_action = menu.addAction("Редактировать")
-        delete_action = menu.addAction("Удалить")
+        edit_action = None
+        if len(selected_ids) == 1:
+            edit_action = menu.addAction("Редактировать")
+        delete_action = menu.addAction("Удалить выбранные")
 
         action = menu.exec(self.table.viewport().mapToGlobal(position))
 
         if action == edit_action:
             self.edit_selected_replacement()
         elif action == delete_action:
-            self.delete_selected_replacement()
+            self.delete_selected_replacements()
 
 
 class OrdersHistoryView(QWidget):
@@ -507,6 +549,10 @@ class OrdersHistoryView(QWidget):
         filters_layout.addWidget(build_filter_block("Контрагент", self.counterparty_combo))
         filters_layout.addStretch()
 
+        self.delete_button = QPushButton("Удалить выбранные")
+        self.delete_button.clicked.connect(self.delete_selected_orders)
+        filters_layout.addWidget(self.delete_button)
+
         self.model = OrdersHistoryTableModel(self)
         self.proxy_model = QSortFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.model)
@@ -514,8 +560,12 @@ class OrdersHistoryView(QWidget):
         self.table = QTableView(self)
         self.table.setModel(self.proxy_model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSortingEnabled(True)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+        self.table.doubleClicked.connect(self.open_selected_order)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
@@ -523,6 +573,8 @@ class OrdersHistoryView(QWidget):
 
         layout.addWidget(filters_container)
         layout.addWidget(self.table)
+        self.table.selectionModel().selectionChanged.connect(self._update_delete_button_state)
+        self._update_delete_button_state()
 
     def _load_counterparties(self):
         self.counterparty_combo.blockSignals(True)
@@ -545,6 +597,103 @@ class OrdersHistoryView(QWidget):
         counterparty_id = self.counterparty_combo.currentData()
         data = self.db.get_completed_orders_history(start_date, end_date, counterparty_id)
         self.model.load_data(data)
+
+    def _selected_source_indexes(self):
+        selection_model = self.table.selectionModel()
+        if not selection_model:
+            return []
+        return [self.proxy_model.mapToSource(index) for index in selection_model.selectedRows()]
+
+    def _selected_order_ids(self):
+        ids = []
+        for source_index in self._selected_source_indexes():
+            order_id = self.model.data(source_index, Qt.UserRole)
+            if order_id:
+                ids.append(order_id)
+        return ids
+
+    def _update_delete_button_state(self):
+        self.delete_button.setEnabled(bool(self._selected_order_ids()))
+
+    def delete_selected_orders(self):
+        order_ids = self._selected_order_ids()
+        if not order_ids:
+            QMessageBox.information(self, "Удаление заказов", "Не выбрано ни одного заказа.")
+            return
+
+        if len(order_ids) == 1:
+            prompt = "Удалить выбранный заказ из истории?"
+        else:
+            prompt = f"Удалить {len(order_ids)} заказов из истории?"
+
+        reply = QMessageBox.question(
+            self,
+            "Удаление заказов",
+            prompt,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        success_count = 0
+        errors: list[str] = []
+        for order_id in order_ids:
+            success, message = self.db.delete_order(order_id)
+            if success:
+                success_count += 1
+            else:
+                errors.append(message)
+
+        if success_count:
+            self.event_bus.emit("orders.changed")
+            self.refresh_data()
+            summary = (
+                "Заказ удалён." if success_count == 1 else f"Удалено заказов: {success_count}."
+            )
+            QMessageBox.information(self, "Готово", summary)
+
+        if errors:
+            error_text = "\n".join(dict.fromkeys(errors))
+            QMessageBox.critical(self, "Ошибка", error_text)
+
+    def open_selected_order(self, index: QModelIndex | None = None):
+        if index is not None and index.model() is self.proxy_model:
+            source_index = self.proxy_model.mapToSource(index)
+        else:
+            selected = self._selected_source_indexes()
+            source_index = selected[0] if selected else None
+
+        if source_index is None:
+            QMessageBox.information(self, "Просмотр заказа", "Выберите запись для просмотра.")
+            return
+
+        order_id = self.model.data(source_index, Qt.UserRole)
+        if not order_id:
+            QMessageBox.warning(self, "Просмотр заказа", "Не удалось определить идентификатор заказа.")
+            return
+
+        dialog = OrderDialog(self.db, self.event_bus, order_id, self)
+        if dialog.exec():
+            self.refresh_data()
+
+    def _show_context_menu(self, position):
+        order_ids = self._selected_order_ids()
+        if not order_ids:
+            return
+
+        menu = QMenu(self)
+        open_action = None
+        if len(order_ids) == 1:
+            open_action = menu.addAction("Открыть")
+        delete_action = menu.addAction("Удалить выбранные")
+
+        action = menu.exec(self.table.viewport().mapToGlobal(position))
+        if action == open_action:
+            self.open_selected_order()
+        elif action == delete_action:
+            self.delete_selected_orders()
 
 
 class TasksHistoryView(QWidget):
@@ -608,6 +757,10 @@ class TasksHistoryView(QWidget):
         filters_layout.addWidget(block("Оборудование", self.equipment_combo))
         filters_layout.addStretch()
 
+        self.delete_button = QPushButton("Удалить выбранные")
+        self.delete_button.clicked.connect(self.delete_selected_tasks)
+        filters_layout.addWidget(self.delete_button)
+
         self.model = TasksHistoryTableModel(self)
         self.proxy_model = QSortFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.model)
@@ -615,8 +768,12 @@ class TasksHistoryView(QWidget):
         self.table = QTableView(self)
         self.table.setModel(self.proxy_model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSortingEnabled(True)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
+        self.table.doubleClicked.connect(self.open_selected_task)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
@@ -624,6 +781,8 @@ class TasksHistoryView(QWidget):
 
         layout.addWidget(filters_container)
         layout.addWidget(self.table)
+        self.table.selectionModel().selectionChanged.connect(self._update_delete_button_state)
+        self._update_delete_button_state()
 
     def _load_filters(self):
         self.assignee_combo.blockSignals(True)
@@ -655,6 +814,124 @@ class TasksHistoryView(QWidget):
         equipment_id = self.equipment_combo.currentData()
         rows = self.db.get_tasks_history(start_date, end_date, assignee_id, equipment_id)
         self.model.load_data(rows)
+
+    def _selected_source_indexes(self):
+        selection_model = self.table.selectionModel()
+        if not selection_model:
+            return []
+        return [self.proxy_model.mapToSource(index) for index in selection_model.selectedRows()]
+
+    def _selected_task_ids(self):
+        ids = []
+        for source_index in self._selected_source_indexes():
+            task_id = self.model.data(source_index, Qt.UserRole)
+            if task_id:
+                ids.append(task_id)
+        return ids
+
+    def _update_delete_button_state(self):
+        self.delete_button.setEnabled(bool(self._selected_task_ids()))
+
+    def delete_selected_tasks(self):
+        task_ids = self._selected_task_ids()
+        if not task_ids:
+            QMessageBox.information(self, "Удаление задач", "Не выбрано ни одной записи.")
+            return
+
+        if len(task_ids) == 1:
+            prompt = "Удалить выбранную задачу из истории?"
+        else:
+            prompt = f"Удалить {len(task_ids)} задач из истории?"
+
+        reply = QMessageBox.question(
+            self,
+            "Удаление задач",
+            prompt,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        success_count = 0
+        aggregated_events = {
+            'equipment_ids': set(),
+            'parts_changed': False,
+            'replacements_changed': False,
+        }
+        errors: list[str] = []
+
+        for task_id in task_ids:
+            success, message, events = self.db.delete_task(task_id)
+            if success:
+                success_count += 1
+                equipment_ids = events.get('equipment_ids', [])
+                if equipment_ids:
+                    aggregated_events['equipment_ids'].update(equipment_ids)
+                if events.get('parts_changed'):
+                    aggregated_events['parts_changed'] = True
+                if events.get('replacements_changed'):
+                    aggregated_events['replacements_changed'] = True
+            else:
+                errors.append(message)
+
+        if success_count:
+            self._emit_task_side_effects(aggregated_events)
+            self.event_bus.emit("tasks.changed")
+            self.refresh_data()
+            summary = "Задача удалена." if success_count == 1 else f"Удалено задач: {success_count}."
+            QMessageBox.information(self, "Готово", summary)
+
+        if errors:
+            error_text = "\n".join(dict.fromkeys(errors))
+            QMessageBox.critical(self, "Ошибка", error_text)
+
+    def _emit_task_side_effects(self, events: dict):
+        equipment_ids = set(events.get('equipment_ids', []))
+        for equipment_id in equipment_ids:
+            self.event_bus.emit("equipment_parts_changed", equipment_id)
+        if events.get('parts_changed'):
+            self.event_bus.emit("parts.changed")
+        if events.get('replacements_changed'):
+            self.event_bus.emit("replacements.changed")
+
+    def open_selected_task(self, index: QModelIndex | None = None):
+        if index is not None and index.model() is self.proxy_model:
+            source_index = self.proxy_model.mapToSource(index)
+        else:
+            selected = self._selected_source_indexes()
+            source_index = selected[0] if selected else None
+
+        if source_index is None:
+            QMessageBox.information(self, "Просмотр задачи", "Выберите запись для просмотра.")
+            return
+
+        task_id = self.model.data(source_index, Qt.UserRole)
+        if not task_id:
+            QMessageBox.warning(self, "Просмотр задачи", "Не удалось определить идентификатор задачи.")
+            return
+
+        dialog = TaskDialog(self.db, self.event_bus, task_id, self)
+        if dialog.exec():
+            self.refresh_data()
+
+    def _show_context_menu(self, position):
+        task_ids = self._selected_task_ids()
+        if not task_ids:
+            return
+
+        menu = QMenu(self)
+        open_action = None
+        if len(task_ids) == 1:
+            open_action = menu.addAction("Открыть")
+        delete_action = menu.addAction("Удалить выбранные")
+
+        action = menu.exec(self.table.viewport().mapToGlobal(position))
+        if action == open_action:
+            self.open_selected_task()
+        elif action == delete_action:
+            self.delete_selected_tasks()
 
 
 class KnifeOperationsHistoryView(QWidget):
@@ -716,6 +993,10 @@ class KnifeOperationsHistoryView(QWidget):
         filters_layout.addWidget(block("Комплект", self.part_combo))
         filters_layout.addStretch()
 
+        self.delete_button = QPushButton("Удалить выбранные")
+        self.delete_button.clicked.connect(self.delete_selected_entries)
+        filters_layout.addWidget(self.delete_button)
+
         self.model = KnifeOperationsHistoryModel(self)
         self.proxy_model = QSortFilterProxyModel(self)
         self.proxy_model.setSourceModel(self.model)
@@ -723,8 +1004,11 @@ class KnifeOperationsHistoryView(QWidget):
         self.table = QTableView(self)
         self.table.setModel(self.proxy_model)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setSortingEnabled(True)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self._show_context_menu)
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
@@ -732,6 +1016,8 @@ class KnifeOperationsHistoryView(QWidget):
 
         layout.addWidget(filters_container)
         layout.addWidget(self.table)
+        self.table.selectionModel().selectionChanged.connect(self._update_delete_button_state)
+        self._update_delete_button_state()
 
     def _load_parts(self):
         self.part_combo.blockSignals(True)
@@ -758,6 +1044,93 @@ class KnifeOperationsHistoryView(QWidget):
         part_id = self.part_combo.currentData()
         rows = self.db.get_knife_operations_history(start_date, end_date, part_id)
         self.model.load_data(rows)
+        self._update_delete_button_state()
+
+    def _selected_source_indexes(self):
+        selection_model = self.table.selectionModel()
+        if not selection_model:
+            return []
+        return [self.proxy_model.mapToSource(index) for index in selection_model.selectedRows()]
+
+    def _selected_entries(self):
+        entries: list[dict] = []
+        for source_index in self._selected_source_indexes():
+            entry = self.model.get_entry(source_index.row())
+            if entry:
+                entries.append(entry)
+        return entries
+
+    def _update_delete_button_state(self):
+        self.delete_button.setEnabled(bool(self._selected_entries()))
+
+    def delete_selected_entries(self):
+        entries = self._selected_entries()
+        if not entries:
+            QMessageBox.information(self, "Удаление записей", "Не выбрано ни одной записи.")
+            return
+
+        type_labels = {
+            'sharpen': 'заточек',
+            'status': 'изменений статуса',
+        }
+        counts: dict[str, int] = {}
+        for entry in entries:
+            label = type_labels.get(entry.get('entry_type'), 'записей')
+            counts[label] = counts.get(label, 0) + 1
+
+        summary_parts = [f"{count} {label}" for label, count in counts.items()]
+        summary = ", ".join(summary_parts)
+        prompt = f"Удалить выбранные записи ({summary})?"
+
+        reply = QMessageBox.question(
+            self,
+            "Удаление истории",
+            prompt,
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        success_count = 0
+        errors: list[str] = []
+        for entry in entries:
+            entry_type = entry.get('entry_type')
+            entry_id = entry.get('entry_id')
+            if not entry_id:
+                continue
+
+            if entry_type == 'status':
+                success, message = self.db.delete_knife_status_entry(entry_id)
+            else:
+                success, message = self.db.delete_knife_sharpen_entry(entry_id)
+
+            if success:
+                success_count += 1
+            else:
+                errors.append(message)
+
+        if success_count:
+            self.event_bus.emit("knives.changed")
+            self.refresh_data()
+            info = "Запись удалена." if success_count == 1 else f"Удалено записей: {success_count}."
+            QMessageBox.information(self, "Готово", info)
+
+        if errors:
+            error_text = "\n".join(dict.fromkeys(errors))
+            QMessageBox.critical(self, "Ошибка", error_text)
+
+    def _show_context_menu(self, position):
+        entries = self._selected_entries()
+        if not entries:
+            return
+
+        menu = QMenu(self)
+        delete_action = menu.addAction("Удалить выбранные")
+        action = menu.exec(self.table.viewport().mapToGlobal(position))
+        if action == delete_action:
+            self.delete_selected_entries()
 
 
 class ReplacementHistoryTab(QWidget):
