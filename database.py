@@ -187,6 +187,66 @@ class Database:
             return dict(row) if row else None
         return None
 
+    def get_setting(self, key: str, default: str = "") -> str:
+        """Возвращает значение настройки приложения."""
+        row = self.fetchone("SELECT value FROM app_settings WHERE key = ?", (key,))
+        if row and row.get("value") is not None:
+            return str(row["value"])
+        return default
+
+    def set_setting(self, key: str, value: Optional[str]) -> bool:
+        """Сохраняет значение настройки приложения. Если значение None или пустое — удаляет настройку."""
+        if not self.conn:
+            return False
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                if value:
+                    cursor.execute(
+                        """
+                            INSERT INTO app_settings (key, value) VALUES (?, ?)
+                            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                        """,
+                        (key, value),
+                    )
+                else:
+                    cursor.execute("DELETE FROM app_settings WHERE key = ?", (key,))
+            return True
+        except sqlite3.Error as exc:
+            logging.error("Не удалось сохранить настройку %s: %s", key, exc, exc_info=True)
+            return False
+
+    def get_driver_phone(self) -> str:
+        """Возвращает сохранённый номер телефона водителя."""
+        return self.get_setting("driver_phone", "")
+
+    def set_driver_phone(self, phone: str) -> bool:
+        """Сохраняет номер телефона водителя."""
+        value = phone.strip()
+        return self.set_setting("driver_phone", value if value else None)
+
+    def set_order_driver_notified(self, order_id: int, notified: bool) -> tuple[bool, str]:
+        """Фиксирует, что водитель уведомлён по конкретному заказу."""
+        if not self.conn:
+            return False, "Нет подключения к базе данных."
+
+        try:
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE orders SET driver_notified = ? WHERE id = ?",
+                    (1 if notified else 0, order_id),
+                )
+            return True, ""
+        except sqlite3.Error as exc:
+            logging.error(
+                "Не удалось обновить статус уведомления водителя для заказа %s: %s",
+                order_id,
+                exc,
+                exc_info=True,
+            )
+            return False, str(exc)
+
     def run_migrations(self):
         """Применяет миграции к схеме БД."""
         if not self.conn: return
@@ -279,6 +339,13 @@ class Database:
             self.conn.commit()
             logging.info("Database migrated to version 12.")
 
+        if user_version < 13:
+            logging.info("Applying migration to version 13...")
+            self._apply_migration_v13()
+            cursor.execute("PRAGMA user_version = 13;")
+            self.conn.commit()
+            logging.info("Database migrated to version 13.")
+
 
     def _apply_migration_v1(self):
         """Схема БД версии 1."""
@@ -337,6 +404,7 @@ class Database:
                 delivery_date TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime')),
                 status TEXT NOT NULL CHECK(status IN ('создан','в пути','принят','отменён')),
+                driver_notified INTEGER NOT NULL DEFAULT 0,
                 comment TEXT,
                 FOREIGN KEY (counterparty_id) REFERENCES counterparties(id) ON DELETE RESTRICT
             );
@@ -360,6 +428,10 @@ class Database:
                 reason TEXT,
                 FOREIGN KEY (equipment_id) REFERENCES equipment(id) ON DELETE RESTRICT,
                 FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT
+            );
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
             );
             INSERT OR IGNORE INTO part_categories (name) VALUES ('ножи');
         """
@@ -680,6 +752,30 @@ class Database:
         except sqlite3.Error as exc:
             logging.error("Migration v12: ошибка при создании таблицы periodic_tasks: %s", exc, exc_info=True)
 
+    def _apply_migration_v13(self):
+        """Добавляет хранение настроек приложения и отметку уведомления водителя."""
+        if not self.conn:
+            return
+
+        cursor = self.conn.cursor()
+
+        try:
+            cursor.execute("ALTER TABLE orders ADD COLUMN driver_notified INTEGER NOT NULL DEFAULT 0;")
+        except sqlite3.OperationalError as exc:
+            logging.info("Migration v13: колонка orders.driver_notified уже существует: %s", exc)
+
+        try:
+            cursor.execute(
+                """
+                    CREATE TABLE IF NOT EXISTS app_settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+                """
+            )
+        except sqlite3.Error as exc:
+            logging.error("Migration v13: ошибка при создании таблицы app_settings: %s", exc, exc_info=True)
+
     def backup_database(self) -> tuple[bool, str]:
         if not self.conn: return False, "Нет подключения к базе данных."
         import time
@@ -754,7 +850,14 @@ class Database:
     def get_active_orders(self):
         """Возвращает заказы со статусом 'создан' или 'в пути'."""
         query = """
-            SELECT o.id, c.name as counterparty_name, o.invoice_no, o.invoice_date, o.delivery_date, o.status, o.comment
+            SELECT o.id,
+                   c.name as counterparty_name,
+                   o.invoice_no,
+                   o.invoice_date,
+                   o.delivery_date,
+                   o.status,
+                   o.comment,
+                   o.driver_notified
             FROM orders o
             JOIN counterparties c ON o.counterparty_id = c.id
             WHERE o.status IN ('создан', 'в пути')
@@ -980,6 +1083,7 @@ class Database:
                    o.created_at,
                    o.status,
                    o.comment,
+                   o.driver_notified,
                    c.address as counterparty_address
             FROM orders o
             JOIN counterparties c ON o.counterparty_id = c.id
@@ -1006,6 +1110,7 @@ class Database:
                 o.delivery_address,
                 o.status,
                 o.comment,
+                o.driver_notified,
                 c.address AS counterparty_address
             FROM orders o
             JOIN counterparties c ON o.counterparty_id = c.id

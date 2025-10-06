@@ -82,8 +82,12 @@ class OrdersTableModel(QAbstractTableModel):
     def load_data(self, data):
         self.beginResetModel()
         self._data = data
-        current_ids = {row.get('id') for row in data if row.get('id') is not None}
-        self._notified_orders.intersection_update(current_ids)
+        notified_ids = {
+            row.get('id')
+            for row in data
+            if row.get('id') is not None and row.get('driver_notified')
+        }
+        self._notified_orders = set(notified_ids)
         self.endResetModel()
 
     def get_row(self, row_index: int) -> dict | None:
@@ -98,6 +102,10 @@ class OrdersTableModel(QAbstractTableModel):
             self._notified_orders.add(order_id)
         else:
             self._notified_orders.discard(order_id)
+        for row in self._data:
+            if row.get('id') == order_id:
+                row['driver_notified'] = 1 if notified else 0
+                break
 
     def is_notified(self, order_id: int) -> bool:
         return order_id in self._notified_orders
@@ -131,6 +139,7 @@ class OrdersTab(QWidget):
         self.init_ui()
         self.event_bus.subscribe("orders.changed", self.refresh_data)
         self.event_bus.subscribe("counterparties.changed", self.refresh_data) # На случай переименования
+        self.event_bus.subscribe("orders.driver_notification_changed", self._on_driver_notification_changed)
         self.refresh_data()
 
     def init_ui(self):
@@ -168,6 +177,8 @@ class OrdersTab(QWidget):
         self.driver_phone_input.setPlaceholderText("Например, 79991234567")
         self.driver_phone_input.setMaximumWidth(180)
         self.driver_phone_input.setClearButtonEnabled(True)
+        self.driver_phone_input.editingFinished.connect(self._persist_driver_phone)
+        self._load_driver_phone()
 
         driver_layout.addWidget(driver_label)
         driver_layout.addWidget(self.driver_phone_input)
@@ -210,10 +221,11 @@ class OrdersTab(QWidget):
 
         header = self.table_view.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(OrdersTableModel.ACTION_COLUMN, QHeaderView.Fixed)
         header.setStretchLastSection(False)
 
         apply_table_compact_style(self.table_view)
-        self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 260)
+        self.table_view.setColumnWidth(OrdersTableModel.ACTION_COLUMN, 320)
 
         self.proxy_model.layoutChanged.connect(self._populate_action_widgets)
         self.proxy_model.modelReset.connect(self._populate_action_widgets)
@@ -223,6 +235,44 @@ class OrdersTab(QWidget):
         orders_data = self.db.get_all_orders_with_counterparty()
         self.base_model.load_data(orders_data)
         self._populate_action_widgets()
+
+    def _normalize_driver_phone(self, text: str) -> str:
+        digits_only = ''.join(ch for ch in text if ch.isdigit())
+        if len(digits_only) == 11 and digits_only.startswith('8'):
+            digits_only = '7' + digits_only[1:]
+        return digits_only
+
+    def _load_driver_phone(self):
+        saved_phone = self.db.get_driver_phone()
+        if saved_phone:
+            self.driver_phone_input.setText(saved_phone)
+
+    def _persist_driver_phone(self):
+        digits_only = self._normalize_driver_phone(self.driver_phone_input.text())
+        if digits_only:
+            self.driver_phone_input.setText(digits_only)
+        else:
+            self.driver_phone_input.clear()
+        if not self.db.set_driver_phone(digits_only):
+            logging.warning("Не удалось сохранить номер водителя.")
+
+    def _store_driver_phone(self, digits_only: str):
+        if digits_only:
+            self.driver_phone_input.setText(digits_only)
+        else:
+            self.driver_phone_input.clear()
+        if not self.db.set_driver_phone(digits_only):
+            logging.warning("Не удалось сохранить номер водителя.")
+
+    def _update_checkbox_state(self, order_id: int, checked: bool):
+        widget = self._action_widgets.get(order_id)
+        if not widget:
+            return
+        checkbox = widget.property("notify_checkbox")
+        if isinstance(checkbox, QCheckBox):
+            checkbox.blockSignals(True)
+            checkbox.setChecked(checked)
+            checkbox.blockSignals(False)
 
     def toggle_hide_completed(self, state):
         self.proxy_model.set_hide_completed(state == Qt.Checked)
@@ -338,7 +388,7 @@ class OrdersTab(QWidget):
             invoice_button.setEnabled(False)
         layout.addWidget(invoice_button)
 
-        notify_checkbox = QCheckBox()
+        notify_checkbox = QCheckBox("Сообщить водителю")
         notify_checkbox.setToolTip("Водитель уведомлён")
         if order_id is not None:
             notify_checkbox.setChecked(self.base_model.is_notified(order_id))
@@ -348,12 +398,13 @@ class OrdersTab(QWidget):
         else:
             notify_checkbox.setEnabled(False)
         layout.addWidget(notify_checkbox)
+        widget.setProperty("notify_checkbox", notify_checkbox)
 
         phone_button = self._create_action_button("📞", "#0277bd")
         phone_button.setToolTip("Отправить данные водителю")
         if order_id is not None:
             phone_button.clicked.connect(
-                lambda _, data=order, chk=notify_checkbox: self._send_order_to_driver(data, chk)
+                lambda _, data=order: self._send_order_to_driver(data)
             )
         else:
             phone_button.setEnabled(False)
@@ -424,7 +475,27 @@ class OrdersTab(QWidget):
             )
 
     def _set_order_notified(self, order_id: int, notified: bool):
+        previous_state = self.base_model.is_notified(order_id)
+        success, message = self.db.set_order_driver_notified(order_id, notified)
+        if not success:
+            logging.warning("Не удалось обновить отметку об уведомлении водителя: %s", message)
+            self._update_checkbox_state(order_id, previous_state)
+            if message:
+                QMessageBox.warning(self, "Сообщение водителю", message)
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Сообщение водителю",
+                    "Не удалось сохранить отметку об уведомлении водителя.",
+                )
+            return
+
         self.base_model.set_notified(order_id, notified)
+        self.event_bus.emit("orders.driver_notification_changed", order_id, notified)
+
+    def _on_driver_notification_changed(self, order_id: int, notified: bool):
+        self.base_model.set_notified(order_id, notified)
+        self._update_checkbox_state(order_id, notified)
 
     def _mark_order_in_transit(self, order_id: int, button: QPushButton):
         success, message = self.db.update_order_status(order_id, 'в пути')
@@ -453,17 +524,17 @@ class OrdersTab(QWidget):
         else:
             QMessageBox.warning(self, "Поставка", message)
 
-    def _send_order_to_driver(self, order: dict, checkbox: QCheckBox):
+    def _send_order_to_driver(self, order: dict):
         driver_number_raw = self.driver_phone_input.text().strip()
-        digits_only = ''.join(ch for ch in driver_number_raw if ch.isdigit())
+        digits_only = self._normalize_driver_phone(driver_number_raw)
         if not digits_only:
             QMessageBox.warning(self, "Номер водителя", "Укажите номер водителя, чтобы отправить сообщение.")
             return
-        if len(digits_only) == 11 and digits_only.startswith('8'):
-            digits_only = '7' + digits_only[1:]
         if len(digits_only) < 11:
             QMessageBox.warning(self, "Номер водителя", "Неверный формат номера. Используйте 79XXXXXXXXX.")
             return
+
+        self._store_driver_phone(digits_only)
 
         invoice_date = db_string_to_ui_string(order.get('invoice_date'))
         invoice_line = f"Счет №{order.get('invoice_no', '')}" if order.get('invoice_no') else "Счет"
@@ -487,8 +558,5 @@ class OrdersTab(QWidget):
 
         order_id = order.get('id')
         if order_id is not None:
-            self.base_model.set_notified(order_id, True)
-            checkbox.blockSignals(True)
-            checkbox.setChecked(True)
-            checkbox.blockSignals(False)
+            self._set_order_notified(order_id, True)
 
