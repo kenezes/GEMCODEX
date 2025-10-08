@@ -158,6 +158,10 @@ class DashboardTab(QWidget):
         self.event_bus.subscribe("orders.changed", self.refresh_orders_table)
         self.event_bus.subscribe("tasks.changed", self.refresh_tasks_table)
         self.event_bus.subscribe("periodic_tasks.changed", self.refresh_periodic_tasks_table)
+        self.event_bus.subscribe(
+            "orders.driver_notification_changed",
+            self._on_driver_notification_changed,
+        )
 
     def refresh_all_tables(self):
         self.refresh_parts_table()
@@ -353,10 +357,12 @@ class DashboardTab(QWidget):
             invoice_button.setEnabled(False)
         layout.addWidget(invoice_button)
 
-        checkbox = QCheckBox()
+        checkbox = QCheckBox("Сообщить водителю")
         checkbox.setToolTip("Водитель уведомлён")
+        is_notified = bool(order.get('driver_notified'))
         if order_id is not None and order_id in self._notified_orders:
-            checkbox.setChecked(True)
+            is_notified = True
+        checkbox.setChecked(is_notified)
         if order_id is not None:
             checkbox.stateChanged.connect(
                 lambda state, o_id=order_id: self._set_order_notified(o_id, state == Qt.Checked)
@@ -364,12 +370,13 @@ class DashboardTab(QWidget):
         else:
             checkbox.setEnabled(False)
         layout.addWidget(checkbox)
+        widget.setProperty("notify_checkbox", checkbox)
 
         phone_button = self._create_small_button("📞", "#0277bd")
         phone_button.setToolTip("Отправить данные водителю")
         if order_id is not None:
             phone_button.clicked.connect(
-                lambda _, data=order, chk=checkbox: self._send_order_to_driver(data, chk)
+                lambda _, data=order: self._send_order_to_driver(data)
             )
         else:
             phone_button.setEnabled(False)
@@ -422,13 +429,56 @@ class DashboardTab(QWidget):
         if self.change_order_status(order_id, 'в пути'):
             self._update_invoice_button_style(button, 'в пути')
 
+    def _update_order_checkbox(self, order_id: int, checked: bool):
+        for row in range(self.orders_table.rowCount()):
+            item = self.orders_table.item(row, 0)
+            if not item or item.data(Qt.UserRole) != order_id:
+                continue
+            widget = self.orders_table.cellWidget(row, 6)
+            if widget:
+                checkbox = widget.property("notify_checkbox")
+                if isinstance(checkbox, QCheckBox):
+                    checkbox.blockSignals(True)
+                    checkbox.setChecked(checked)
+                    checkbox.blockSignals(False)
+            break
+
+    def _remember_driver_phone(self, digits_only: str):
+        if not self.db.set_driver_phone(digits_only):
+            logging.warning("Dashboard: не удалось сохранить номер водителя.")
+            return
+
+        orders_tab = getattr(self.main_window, 'orders_tab', None)
+        driver_input = getattr(orders_tab, 'driver_phone_input', None) if orders_tab else None
+        if driver_input:
+            driver_input.blockSignals(True)
+            driver_input.setText(digits_only)
+            driver_input.blockSignals(False)
+
     def _set_order_notified(self, order_id: int, notified: bool):
+        was_notified = order_id in self._notified_orders
+        success, message = self.db.set_order_driver_notified(order_id, notified)
+        if not success:
+            logging.warning("Dashboard: не удалось обновить отметку для заказа %s: %s", order_id, message)
+            self._update_order_checkbox(order_id, was_notified)
+            if message:
+                QMessageBox.warning(self, "Сообщение водителю", message)
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Сообщение водителю",
+                    "Не удалось сохранить отметку об уведомлении водителя.",
+                )
+            return
+
         if notified:
             self._notified_orders.add(order_id)
         else:
             self._notified_orders.discard(order_id)
 
-    def _send_order_to_driver(self, order: dict, checkbox: QCheckBox):
+        self.event_bus.emit("orders.driver_notification_changed", order_id, notified)
+
+    def _send_order_to_driver(self, order: dict):
         phone_number = self._request_driver_phone()
         if not phone_number:
             return
@@ -455,15 +505,19 @@ class DashboardTab(QWidget):
         order_id = order.get('id')
         if order_id is not None:
             self._set_order_notified(order_id, True)
-            checkbox.blockSignals(True)
-            checkbox.setChecked(True)
-            checkbox.blockSignals(False)
+
+    def _on_driver_notification_changed(self, order_id: int, notified: bool):
+        if notified:
+            self._notified_orders.add(order_id)
+        else:
+            self._notified_orders.discard(order_id)
+        self._update_order_checkbox(order_id, notified)
 
     def _request_driver_phone(self) -> str:
-        default_value = ""
+        default_value = self.db.get_driver_phone()
         orders_tab = getattr(self.main_window, 'orders_tab', None)
         driver_input = getattr(orders_tab, 'driver_phone_input', None) if orders_tab else None
-        if driver_input:
+        if not default_value and driver_input:
             default_value = driver_input.text()
 
         text, ok = QInputDialog.getText(
@@ -489,6 +543,7 @@ class DashboardTab(QWidget):
             QMessageBox.warning(self, "Номер водителя", "Укажите номер в формате 79XXXXXXXXX.")
             return ""
 
+        self._remember_driver_phone(digits_only)
         return digits_only
 
     def open_task_from_dashboard(self, row: int, column: int):
@@ -516,8 +571,11 @@ class DashboardTab(QWidget):
     def refresh_orders_table(self):
         self.orders_table.setRowCount(0)
         orders = self.db.get_active_orders()
-        current_ids = {order['id'] for order in orders if order.get('id') is not None}
-        self._notified_orders.intersection_update(current_ids)
+        self._notified_orders = {
+            order['id']
+            for order in orders
+            if order.get('id') is not None and order.get('driver_notified')
+        }
         for row, order in enumerate(orders):
             self.orders_table.insertRow(row)
 
