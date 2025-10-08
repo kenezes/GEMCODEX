@@ -1,9 +1,18 @@
 import logging
-from PySide6.QtWidgets import (QDialog, QVBoxLayout, QFormLayout, QLineEdit,
-                             QDialogButtonBox, QMessageBox, QSpinBox, QLabel)
-from PySide6.QtCore import Qt
+from PySide6.QtWidgets import (
+    QDialog,
+    QVBoxLayout,
+    QFormLayout,
+    QLineEdit,
+    QDialogButtonBox,
+    QMessageBox,
+    QSpinBox,
+    QLabel,
+    QDateEdit,
+)
+from PySide6.QtCore import Qt, QDate
 
-from .utils import get_current_date_str_for_db
+from .utils import qdate_to_db_string
 
 class ReplacementDialog(QDialog):
     def __init__(self, db, event_bus, part_data, parent=None):
@@ -20,14 +29,18 @@ class ReplacementDialog(QDialog):
         part_sku = self.part_data.get('part_sku', 'б/а')
 
         self.part_label = QLabel(f"{part_name} ({part_sku})")
+        self.date_edit = QDateEdit(QDate.currentDate())
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("dd.MM.yyyy")
         self.qty_spinbox = QSpinBox()
         self.qty_spinbox.setRange(1, 1000)
         self.qty_spinbox.setValue(self.part_data.get('installed_qty', 1))
-        
+
         self.reason_edit = QLineEdit()
         self.reason_edit.setPlaceholderText("Например: плановое ТО, поломка")
 
         form_layout.addRow("Запчасть:", self.part_label)
+        form_layout.addRow("Дата замены:", self.date_edit)
         form_layout.addRow("Списывается со склада, шт.*:", self.qty_spinbox)
         form_layout.addRow("Причина:", self.reason_edit)
 
@@ -43,7 +56,7 @@ class ReplacementDialog(QDialog):
         reason = self.reason_edit.text().strip()
         part_id = self.part_data['part_id']
         equipment_id = self.part_data['equipment_id']
-        date_str = get_current_date_str_for_db()
+        date_str = qdate_to_db_string(self.date_edit.date())
 
         success, message = self.db.perform_replacement(date_str, equipment_id, part_id, qty_to_replace, reason)
 
