@@ -12,10 +12,17 @@ from .manual_part_dialog import ManualPartDialog
 
 class OrderItemsTableModel(QAbstractTableModel):
     """Модель данных для таблицы позиций в заказе."""
+    NAME_COLUMN = 0
+    SKU_COLUMN = 1
+    EQUIPMENT_COLUMN = 2
+    QTY_COLUMN = 3
+    PRICE_COLUMN = 4
+    SUM_COLUMN = 5
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._headers = ["Наименование", "Артикул", "Кол-во", "Цена", "Сумма"]
-        # item: [part_id, name, sku, qty, price, original_price]
+        self._headers = ["Наименование", "Артикул", "Оборудование", "Кол-во", "Цена", "Сумма"]
+        # item: [part_id, name, sku, equipment, qty, price, original_price]
         self._items = []
 
     def rowCount(self, parent=QModelIndex()):
@@ -32,11 +39,12 @@ class OrderItemsTableModel(QAbstractTableModel):
         col = index.column()
 
         if role == Qt.DisplayRole:
-            if col == 0: return item[1] # name
-            if col == 1: return item[2] # sku
-            if col == 2: return item[3] # qty
-            if col == 3: return f"{item[4]:.2f}" # price
-            if col == 4: return f"{item[3] * item[4]:.2f}" # sum
+            if col == self.NAME_COLUMN: return item[1]  # name
+            if col == self.SKU_COLUMN: return item[2]  # sku
+            if col == self.EQUIPMENT_COLUMN: return item[3] or ""  # equipment list
+            if col == self.QTY_COLUMN: return item[4]  # qty
+            if col == self.PRICE_COLUMN: return f"{item[5]:.2f}"  # price
+            if col == self.SUM_COLUMN: return f"{item[4] * item[5]:.2f}"  # sum
         
         return None
 
@@ -47,7 +55,7 @@ class OrderItemsTableModel(QAbstractTableModel):
     
     def flags(self, index):
         # Разрешаем редактирование для колонок "Кол-во" и "Цена"
-        if index.column() in [2, 3]:
+        if index.column() in [self.QTY_COLUMN, self.PRICE_COLUMN]:
             return Qt.ItemIsEditable | Qt.ItemIsEnabled | Qt.ItemIsSelectable
         return super().flags(index)
 
@@ -56,25 +64,25 @@ class OrderItemsTableModel(QAbstractTableModel):
             row = index.row()
             col = index.column()
             item = self._items[row]
-            
+
             # Колонка 2: Количество
-            if col == 2:
+            if col == self.QTY_COLUMN:
                 try:
                     qty = int(value)
                     if qty > 0:
-                        item[3] = qty
-                        self.dataChanged.emit(index, index.siblingAtColumn(4)) # Обновить сумму
+                        item[4] = qty
+                        self.dataChanged.emit(index, index.siblingAtColumn(self.SUM_COLUMN)) # Обновить сумму
                         return True
                 except ValueError:
                     return False
 
             # Колонка 3: Цена
-            if col == 3:
+            if col == self.PRICE_COLUMN:
                 try:
                     price = round(float(str(value).replace(',', '.')), 2)
                     if price >= 0:
-                        item[4] = price
-                        self.dataChanged.emit(index, index.siblingAtColumn(4)) # Обновить сумму
+                        item[5] = price
+                        self.dataChanged.emit(index, index.siblingAtColumn(self.SUM_COLUMN)) # Обновить сумму
                         return True
                 except (ValueError, TypeError):
                     return False
@@ -92,7 +100,10 @@ class OrderItemsTableModel(QAbstractTableModel):
             self.endRemoveRows()
 
     def get_items(self):
-        return self._items
+        return [
+            [item[0], item[1], item[2], item[4], item[5], item[6]]
+            for item in self._items
+        ]
 
     def load_items(self, items):
         self.beginResetModel()
@@ -122,7 +133,17 @@ class OrderDialog(QDialog):
             self.load_order_data()
         elif initial_items:
              # Загружаем предзаполненные данные с дашборда
-            formatted_items = [[item['part_id'], item['name'], item['sku'], item['qty'], item['price'], item['price']] for item in initial_items]
+            formatted_items = [
+                self._build_item_row(
+                    item['part_id'],
+                    item['name'],
+                    item['sku'],
+                    item['qty'],
+                    item['price'],
+                    item['price'],
+                )
+                for item in initial_items
+            ]
             self.items_table_model.load_items(formatted_items)
 
 
@@ -186,6 +207,28 @@ class OrderDialog(QDialog):
         self.button_box.accepted.connect(self.accept)
         self.button_box.rejected.connect(self.reject)
         main_layout.addWidget(self.button_box)
+
+    def _build_item_row(self, part_id, name, sku, qty, price, original_price=None):
+        equipment_info = ""
+        if part_id:
+            try:
+                equipment_info = self.db.get_equipment_display_for_part(part_id) or ""
+            except Exception as exc:
+                logging.error(
+                    "Не удалось загрузить список оборудования для запчасти %s: %s",
+                    part_id,
+                    exc,
+                    exc_info=True,
+                )
+        return [
+            part_id,
+            name,
+            sku,
+            equipment_info,
+            qty,
+            price,
+            original_price if original_price is not None else price,
+        ]
 
     def load_combobox_data(self):
         try:
@@ -262,8 +305,17 @@ class OrderDialog(QDialog):
             self.comment_edit.setText(order_data['comment'] or "")
             
             raw_items = self.db.get_order_items(self.order_id)
-            # [part_id, name, sku, qty, price, original_price]
-            items = [[i['part_id'], i['name'], i['sku'], i['qty'], i['price'], i['price']] for i in raw_items]
+            items = [
+                self._build_item_row(
+                    i['part_id'],
+                    i['name'],
+                    i['sku'],
+                    i['qty'],
+                    i['price'],
+                    i['price'],
+                )
+                for i in raw_items
+            ]
             self.items_table_model.load_items(items)
         except Exception as e:
             logging.error(f"Ошибка загрузки данных заказа ID {self.order_id}: {e}")
@@ -276,16 +328,30 @@ class OrderDialog(QDialog):
             if part:
                 qty, ok = QInputDialog.getInt(self, "Количество", "Введите количество:", 1, 1, 99999)
                 if ok and qty > 0:
-                    item_data = [part['id'], part['name'], part['sku'], qty, part['price'], part['price']]
+                    item_data = self._build_item_row(
+                        part['id'],
+                        part['name'],
+                        part['sku'],
+                        qty,
+                        part['price'],
+                        part['price'],
+                    )
                     self.items_table_model.add_item(item_data)
-    
+
     def add_item_manually(self):
         try:
             dialog = ManualPartDialog(self)
             if dialog.exec():
                 part_data = dialog.get_data()
                 if part_data:
-                    item_data = [None, part_data['name'], part_data['sku'], part_data['qty'], part_data['price'], part_data['price']]
+                    item_data = self._build_item_row(
+                        None,
+                        part_data['name'],
+                        part_data['sku'],
+                        part_data['qty'],
+                        part_data['price'],
+                        part_data['price'],
+                    )
                     self.items_table_model.add_item(item_data)
         except Exception as e:
             logging.error(f"Ошибка при открытии диалога ручного добавления: {e}", exc_info=True)

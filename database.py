@@ -877,7 +877,34 @@ class Database:
         """
         return self.fetchall(query)
     def get_part_by_id(self, part_id): return self.fetchone("SELECT * FROM parts WHERE id = ?", (part_id,))
-    
+
+    def get_equipment_display_for_part(self, part_id: int) -> str:
+        """Возвращает строку с перечнем оборудования, к которому привязана запчасть."""
+        if not part_id:
+            return ""
+
+        rows = self.fetchall(
+            """
+                SELECT e.name, e.sku
+                FROM equipment_parts ep
+                JOIN equipment e ON ep.equipment_id = e.id
+                WHERE ep.part_id = ?
+                ORDER BY e.name
+            """,
+            (part_id,),
+        )
+
+        formatted: list[str] = []
+        for row in rows:
+            # sqlite3.Row поддерживает доступ как по индексу, так и по ключу.
+            name = row["name"] if row else None
+            sku = row["sku"] if row else None
+            if not name:
+                continue
+            formatted.append(f"{name} ({sku})" if sku else name)
+
+        return ", ".join(formatted)
+
     def _ensure_knife_tracking(self, cursor, part_id, category_id):
         """Проверяет и создаёт запись для отслеживания заточки."""
         if category_id is None:
