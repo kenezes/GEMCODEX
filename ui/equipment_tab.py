@@ -587,7 +587,9 @@ class EquipmentTab(QWidget):
         part_copy['has_descendants'] = entry.get('has_descendants', False)
         self._row_parts.insert(row_index, part_copy)
 
-        name_item = QTableWidgetItem(part_copy.get('part_name') or '')
+        # Текст ячейки отображается собственным виджетом, поэтому сам элемент
+        # таблицы оставляем пустым, иначе надпись дублируется поверх виджета.
+        name_item = QTableWidgetItem('')
         name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         self.parts_table.setItem(row_index, 0, name_item)
 
