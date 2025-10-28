@@ -138,6 +138,7 @@ class EquipmentTab(QWidget):
         right_layout.addWidget(self.parts_table)
 
         self.parts_table.itemChanged.connect(self._on_part_item_changed)
+        self.parts_table.cellDoubleClicked.connect(self._on_parts_table_cell_double_clicked)
 
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
@@ -470,6 +471,22 @@ class EquipmentTab(QWidget):
 
         if message:
             QMessageBox.warning(self, 'Комментарий', message)
+
+    def _on_parts_table_cell_double_clicked(self, row: int, column: int):
+        if row < 0 or row >= len(self._row_parts):
+            return
+
+        part_data = self._row_parts[row]
+        if not part_data or part_data.get('row_type') != 'part':
+            return
+
+        if column == 4:
+            item = self.parts_table.item(row, column)
+            if item:
+                self.parts_table.editItem(item)
+            return
+
+        self._edit_attached_part(part_data)
 
     def _populate_parts_table(self, part_tree: list[dict]):
         current_category = None
