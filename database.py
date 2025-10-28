@@ -346,6 +346,13 @@ class Database:
             self.conn.commit()
             logging.info("Database migrated to version 13.")
 
+        if user_version < 14:
+            logging.info("Applying migration to version 14...")
+            self._apply_migration_v14()
+            cursor.execute("PRAGMA user_version = 14;")
+            self.conn.commit()
+            logging.info("Database migrated to version 14.")
+
 
     def _apply_migration_v1(self):
         """Схема БД версии 1."""
@@ -383,6 +390,8 @@ class Database:
                 equipment_id INTEGER NOT NULL,
                 part_id INTEGER NOT NULL,
                 installed_qty INTEGER NOT NULL DEFAULT 1,
+                comment TEXT,
+                last_replacement_override TEXT,
                 FOREIGN KEY (equipment_id) REFERENCES equipment(id) ON DELETE RESTRICT,
                 FOREIGN KEY (part_id) REFERENCES parts(id) ON DELETE RESTRICT,
                 UNIQUE(equipment_id, part_id)
@@ -394,7 +403,8 @@ class Database:
                 contact_person TEXT,
                 phone TEXT,
                 email TEXT,
-                note TEXT
+                note TEXT,
+                driver_note TEXT
             );
             CREATE TABLE IF NOT EXISTS orders (
                 id INTEGER PRIMARY KEY,
@@ -776,6 +786,28 @@ class Database:
         except sqlite3.Error as exc:
             logging.error("Migration v13: ошибка при создании таблицы app_settings: %s", exc, exc_info=True)
 
+    def _apply_migration_v14(self):
+        """Добавляет дополнительные поля для контрагентов и запчастей оборудования."""
+        if not self.conn:
+            return
+
+        cursor = self.conn.cursor()
+
+        try:
+            cursor.execute("ALTER TABLE counterparties ADD COLUMN driver_note TEXT;")
+        except sqlite3.OperationalError as exc:
+            logging.info("Migration v14: колонка counterparties.driver_note уже существует: %s", exc)
+
+        try:
+            cursor.execute("ALTER TABLE equipment_parts ADD COLUMN comment TEXT;")
+        except sqlite3.OperationalError as exc:
+            logging.info("Migration v14: колонка equipment_parts.comment уже существует: %s", exc)
+
+        try:
+            cursor.execute("ALTER TABLE equipment_parts ADD COLUMN last_replacement_override TEXT;")
+        except sqlite3.OperationalError as exc:
+            logging.info("Migration v14: колонка equipment_parts.last_replacement_override уже существует: %s", exc)
+
     def backup_database(self) -> tuple[bool, str]:
         if not self.conn: return False, "Нет подключения к базе данных."
         import time
@@ -851,13 +883,17 @@ class Database:
         """Возвращает заказы со статусом 'создан' или 'в пути'."""
         query = """
             SELECT o.id,
+                   o.counterparty_id,
                    c.name as counterparty_name,
                    o.invoice_no,
                    o.invoice_date,
                    o.delivery_date,
+                   o.delivery_address,
                    o.status,
                    o.comment,
-                   o.driver_notified
+                   o.driver_notified,
+                   c.address as counterparty_address,
+                   c.driver_note as counterparty_driver_note
             FROM orders o
             JOIN counterparties c ON o.counterparty_id = c.id
             WHERE o.status IN ('создан', 'в пути')
@@ -869,7 +905,8 @@ class Database:
     # --- Parts & Categories ---
     def get_all_parts(self):
         query = """
-            SELECT p.id, p.name, p.sku, p.qty, p.min_qty, p.price, pc.name as category_name,
+            SELECT p.id, p.name, p.sku, p.qty, p.min_qty, p.price, p.category_id,
+                   pc.name as category_name,
                    (SELECT GROUP_CONCAT(eq.name, ', ') FROM equipment_parts ep
                     JOIN equipment eq ON ep.equipment_id = eq.id WHERE ep.part_id = p.id) as equipment_list
             FROM parts p LEFT JOIN part_categories pc ON p.category_id = pc.id
@@ -922,20 +959,23 @@ class Database:
         cursor.execute("INSERT OR IGNORE INTO knife_tracking (part_id) VALUES (?)", (part_id,))
     
     def add_part(self, name, sku, qty, min_qty, price, category_id):
-        if not self.conn: return False, "Нет подключения к БД."
+        if not self.conn:
+            return False, "Нет подключения к БД.", None
         try:
             with self.conn:
                 cursor = self.conn.cursor()
-                cursor.execute("INSERT INTO parts (name, sku, qty, min_qty, price, category_id) VALUES (?, ?, ?, ?, ?, ?)",
-                               (name, sku, qty, min_qty, price, category_id))
+                cursor.execute(
+                    "INSERT INTO parts (name, sku, qty, min_qty, price, category_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    (name, sku, qty, min_qty, price, category_id),
+                )
                 part_id = cursor.lastrowid
                 self._ensure_knife_tracking(cursor, part_id, category_id)
             self._log_action(
                 f"Добавлена запчасть #{part_id}: {name} (артикул: {sku}, остаток: {qty}, минимум: {min_qty}, цена: {price:.2f})"
             )
-            return True, "Запчасть успешно добавлена."
+            return True, "Запчасть успешно добавлена.", part_id
         except sqlite3.IntegrityError:
-            return False, "Запчасть с таким Наименованием и Артикулом уже существует."
+            return False, "Запчасть с таким Наименованием и Артикулом уже существует.", None
 
     def update_part(self, part_id, name, sku, qty, min_qty, price, category_id):
         if not self.conn: return False, "Нет подключения к БД."
@@ -1041,7 +1081,17 @@ class Database:
         counterparty["default_address"] = default_address
         counterparty["address"] = self._format_addresses_for_display(addresses) if addresses else default_address
         return counterparty
-    def add_counterparty(self, name, address, contact_person, phone, email, note, addresses=None):
+    def add_counterparty(
+        self,
+        name,
+        address,
+        contact_person,
+        phone,
+        email,
+        note,
+        driver_note,
+        addresses=None,
+    ):
         normalized_addresses = self._normalize_addresses(addresses)
         if not normalized_addresses and address:
             normalized_addresses = self._normalize_addresses([address])
@@ -1053,8 +1103,11 @@ class Database:
             with self.conn:
                 cursor = self.conn.cursor()
                 cursor.execute(
-                    "INSERT INTO counterparties (name, address, contact_person, phone, email, note) VALUES (?, ?, ?, ?, ?, ?)",
-                    (name, default_address, contact_person, phone, email, note),
+                    (
+                        "INSERT INTO counterparties (name, address, contact_person, phone, email, note, driver_note)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?)"
+                    ),
+                    (name, default_address, contact_person, phone, email, note, driver_note),
                 )
                 counterparty_id = cursor.lastrowid
                 if normalized_addresses:
@@ -1064,7 +1117,18 @@ class Database:
         except sqlite3.IntegrityError:
             return False, "Контрагент с таким именем уже существует."
 
-    def update_counterparty(self, c_id, name, address, contact_person, phone, email, note, addresses=None):
+    def update_counterparty(
+        self,
+        c_id,
+        name,
+        address,
+        contact_person,
+        phone,
+        email,
+        note,
+        driver_note,
+        addresses=None,
+    ):
         normalized_addresses = self._normalize_addresses(addresses)
         if not normalized_addresses and address:
             normalized_addresses = self._normalize_addresses([address])
@@ -1076,8 +1140,11 @@ class Database:
             with self.conn:
                 cursor = self.conn.cursor()
                 cursor.execute(
-                    "UPDATE counterparties SET name=?, address=?, contact_person=?, phone=?, email=?, note=? WHERE id=?",
-                    (name, default_address, contact_person, phone, email, note, c_id),
+                    (
+                        "UPDATE counterparties SET name=?, address=?, contact_person=?, phone=?, email=?, note=?, driver_note=?"
+                        " WHERE id=?"
+                    ),
+                    (name, default_address, contact_person, phone, email, note, driver_note, c_id),
                 )
                 if normalized_addresses:
                     self._replace_counterparty_addresses(cursor, c_id, normalized_addresses)
@@ -1102,6 +1169,7 @@ class Database:
     def get_all_orders_with_counterparty(self):
         query = """
             SELECT o.id,
+                   o.counterparty_id,
                    c.name as counterparty_name,
                    o.invoice_no,
                    o.invoice_date,
@@ -1111,12 +1179,33 @@ class Database:
                    o.status,
                    o.comment,
                    o.driver_notified,
-                   c.address as counterparty_address
+                   c.address as counterparty_address,
+                   c.driver_note as counterparty_driver_note
             FROM orders o
             JOIN counterparties c ON o.counterparty_id = c.id
             ORDER BY o.created_at DESC
         """
         return self.fetchall(query)
+
+    def get_order_with_details(self, order_id: int):
+        query = """
+            SELECT o.id,
+                   o.counterparty_id,
+                   c.name AS counterparty_name,
+                   o.invoice_no,
+                   o.invoice_date,
+                   o.delivery_date,
+                   o.delivery_address,
+                   o.status,
+                   o.comment,
+                   o.driver_notified,
+                   c.address AS counterparty_address,
+                   c.driver_note AS counterparty_driver_note
+            FROM orders o
+            JOIN counterparties c ON o.counterparty_id = c.id
+            WHERE o.id = ?
+        """
+        return self.fetchone(query, (order_id,))
 
     def get_completed_orders_history(
         self,
@@ -1129,6 +1218,7 @@ class Database:
         base_query = """
             SELECT
                 o.id,
+                o.counterparty_id,
                 c.name AS counterparty_name,
                 o.invoice_no,
                 o.invoice_date,
@@ -1138,7 +1228,8 @@ class Database:
                 o.status,
                 o.comment,
                 o.driver_notified,
-                c.address AS counterparty_address
+                c.address AS counterparty_address,
+                c.driver_note AS counterparty_driver_note
             FROM orders o
             JOIN counterparties c ON o.counterparty_id = c.id
             WHERE o.status = 'принят'
@@ -1375,11 +1466,18 @@ class Database:
                    p.sku as part_sku,
                    ep.installed_qty,
                    ep.requires_replacement,
+                   ep.comment as part_comment,
+                   ep.last_replacement_override,
                    pc.name as category_name,
                    cc.equipment_id AS component_equipment_id,
-                   (SELECT MAX(r.date)
-                    FROM replacements r
-                    WHERE r.part_id = p.id AND r.equipment_id = ep.equipment_id) as last_replacement_date
+                   COALESCE(
+                       ep.last_replacement_override,
+                       (
+                           SELECT MAX(r.date)
+                           FROM replacements r
+                           WHERE r.part_id = p.id AND r.equipment_id = ep.equipment_id
+                       )
+                   ) as last_replacement_date
             FROM equipment_parts ep
                 JOIN parts p ON ep.part_id = p.id
                 LEFT JOIN part_categories pc ON p.category_id = pc.id
@@ -1388,13 +1486,45 @@ class Database:
             ORDER BY pc.name IS NULL, pc.name, p.name
         """
         return self.fetchall(query, (equipment_id,))
-    def attach_part_to_equipment(self, equipment_id, part_id, qty):
+    def attach_part_to_equipment(
+        self,
+        equipment_id,
+        part_id,
+        qty,
+        comment: str | None = None,
+        last_replacement: str | None = None,
+    ):
         try:
-            self.execute("INSERT INTO equipment_parts (equipment_id, part_id, installed_qty) VALUES (?, ?, ?)", (equipment_id, part_id, qty))
+            self.execute(
+                """
+                INSERT INTO equipment_parts (equipment_id, part_id, installed_qty, comment, last_replacement_override)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (equipment_id, part_id, qty, comment or None, last_replacement or None),
+            )
             if self.conn: self.conn.commit()
             self._log_action(f"Привязана запчасть #{part_id} к оборудованию #{equipment_id} (количество: {qty})")
             return True, "Запчасть успешно привязана."
         except sqlite3.IntegrityError: return False, "Эта запчасть уже привязана к данному оборудованию."
+
+    def update_equipment_part_comment(self, equipment_part_id: int, comment: str) -> tuple[bool, str]:
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
+        try:
+            self.execute(
+                "UPDATE equipment_parts SET comment = ? WHERE id = ?",
+                (comment or None, equipment_part_id),
+            )
+            if self.conn:
+                self.conn.commit()
+            self._log_action(f"Обновлен комментарий привязанной запчасти #{equipment_part_id}")
+            return True, "Комментарий обновлен."
+        except sqlite3.Error as exc:
+            logging.error(
+                "Ошибка обновления комментария запчасти #%s: %s", equipment_part_id, exc, exc_info=True
+            )
+            return False, f"Ошибка базы данных: {exc}"
     def detach_part_from_equipment(self, equipment_part_id):
         if not self.conn:
             return False, "Нет подключения к БД."
@@ -1884,7 +2014,7 @@ class Database:
         return result
     def get_unattached_parts(self, equipment_id):
         query = """
-            SELECT p.id, p.name, p.sku, p.qty, pc.name as category_name
+            SELECT p.id, p.name, p.sku, p.qty, pc.name as category_name, pc.id as category_id
             FROM parts p
                 LEFT JOIN part_categories pc ON p.category_id = pc.id
             WHERE p.id NOT IN (SELECT part_id FROM equipment_parts WHERE equipment_id = ?)

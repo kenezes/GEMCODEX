@@ -1,15 +1,34 @@
 import logging
-from typing import Optional
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QTableView,
-                             QPushButton, QLineEdit, QComboBox, QAbstractItemView,
-                             QHeaderView, QMessageBox, QMenu, QStyledItemDelegate, QStyleOptionButton, QStyle)
+from typing import Optional, Any
+from PySide6.QtWidgets import (
+    QWidget,
+    QVBoxLayout,
+    QHBoxLayout,
+    QTableView,
+    QPushButton,
+    QLineEdit,
+    QSplitter,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QLabel,
+    QAbstractItemView,
+    QHeaderView,
+    QMessageBox,
+    QMenu,
+    QStyledItemDelegate,
+    QStyleOptionButton,
+    QStyle,
+)
 from PySide6.QtCore import (Qt, QAbstractTableModel, QModelIndex,
-                          QSortFilterProxyModel, Signal, QEvent, QSize)
-from PySide6.QtGui import QAction, QIcon
+                          Signal, QEvent, QSize)
+from PySide6.QtGui import QAction, QIcon, QColor, QFont
 
 from .part_dialog import PartDialog
 from .category_manager_dialog import CategoryManagerDialog
 from .utils import apply_table_compact_style, open_part_folder
+
+
+ROW_TYPE_ROLE = Qt.UserRole + 10
 
 
 class FolderButtonDelegate(QStyledItemDelegate):
@@ -24,6 +43,10 @@ class FolderButtonDelegate(QStyledItemDelegate):
             self._icon = parent.style().standardIcon(QStyle.SP_DirIcon)
 
     def paint(self, painter, option, index):  # type: ignore[override]
+        if index.data(ROW_TYPE_ROLE) != 'part':
+            super().paint(painter, option, index)
+            return
+
         button_option = QStyleOptionButton()
         button_option.rect = option.rect.adjusted(4, 6, -4, -6)
         button_option.text = ""
@@ -36,6 +59,8 @@ class FolderButtonDelegate(QStyledItemDelegate):
         option.widget.style().drawControl(QStyle.CE_PushButton, button_option, painter, option.widget)
 
     def editorEvent(self, event, model, option, index):  # type: ignore[override]
+        if index.data(ROW_TYPE_ROLE) != 'part':
+            return False
         if event.type() == QEvent.MouseButtonPress and option.rect.contains(event.pos()):
             if hasattr(event, 'button') and event.button() != Qt.LeftButton:
                 return False
@@ -48,6 +73,9 @@ class FolderButtonDelegate(QStyledItemDelegate):
         return False
 
 class WarehouseTab(QWidget):
+    ALL_CATEGORIES = -1
+    UNCATEGORIZED = "__none__"
+
     def __init__(self, db, event_bus, parent=None):
         super().__init__(parent)
         self.db = db
@@ -61,44 +89,66 @@ class WarehouseTab(QWidget):
 
     def init_ui(self):
         layout = QVBoxLayout(self)
-        
-        # Панель управления
+
+        splitter = QSplitter(Qt.Horizontal)
+        layout.addWidget(splitter)
+
+        categories_panel = QWidget()
+        categories_layout = QVBoxLayout(categories_panel)
+        categories_layout.setContentsMargins(0, 0, 0, 0)
+        categories_layout.setSpacing(6)
+
+        categories_header = QHBoxLayout()
+        categories_header.setContentsMargins(0, 0, 0, 0)
+        categories_header.setSpacing(4)
+        categories_label = QLabel("Категории")
+        categories_label.setStyleSheet("font-weight: 500;")
+        categories_header.addWidget(categories_label)
+        categories_header.addStretch()
+        self.category_button = QPushButton("Категории...")
+        self.category_button.clicked.connect(self.manage_categories)
+        categories_header.addWidget(self.category_button)
+        categories_layout.addLayout(categories_header)
+
+        self.category_tree = QTreeWidget()
+        self.category_tree.setHeaderHidden(True)
+        self.category_tree.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.category_tree.currentItemChanged.connect(self._on_category_selection_changed)
+        categories_layout.addWidget(self.category_tree)
+
+        splitter.addWidget(categories_panel)
+
+        content_panel = QWidget()
+        content_layout = QVBoxLayout(content_panel)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(8)
+
         control_layout = QHBoxLayout()
+        control_layout.setContentsMargins(0, 0, 0, 0)
+        control_layout.setSpacing(6)
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Поиск по наименованию/артикулу...")
         self.search_input.textChanged.connect(self.filter_data)
-        
-        self.category_filter = QComboBox()
-        self.category_filter.currentIndexChanged.connect(self.filter_data)
-
+        control_layout.addWidget(self.search_input)
+        control_layout.addStretch()
         add_button = QPushButton("Добавить запчасть")
         add_button.clicked.connect(self.add_part)
-
-        category_button = QPushButton("Категории...")
-        category_button.clicked.connect(self.manage_categories)
-        
         refresh_button = QPushButton("Обновить")
         refresh_button.clicked.connect(self.refresh_data)
-
-        control_layout.addWidget(self.search_input)
-        control_layout.addWidget(self.category_filter)
-        control_layout.addStretch()
-        control_layout.addWidget(category_button)
         control_layout.addWidget(add_button)
         control_layout.addWidget(refresh_button)
-        layout.addLayout(control_layout)
+        content_layout.addLayout(control_layout)
 
-        # Таблица
         self.table_view = QTableView()
         self.table_model = TableModel()
-
-        self.proxy_model = CustomSortFilterProxyModel(self.db, self)
-        self.proxy_model.setSourceModel(self.table_model)
-        self.proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
-
-        self.table_view.setModel(self.proxy_model)
+        self.table_view.setModel(self.table_model)
         self._setup_table()
-        layout.addWidget(self.table_view)
+        content_layout.addWidget(self.table_view)
+
+        splitter.addWidget(content_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        categories_panel.setMinimumWidth(220)
 
     def _setup_table(self):
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows)
@@ -123,31 +173,47 @@ class WarehouseTab(QWidget):
         self.table_view.setColumnWidth(TableModel.FOLDER_COLUMN, 100)
 
     def load_categories(self):
-        current_cat = self.category_filter.currentData()
-        self.category_filter.blockSignals(True)
-        self.category_filter.clear()
-        self.category_filter.addItem("Все категории", -1)
+        current_selection = self._get_selected_category_token()
         categories = self.db.get_part_categories()
+        lookup = {cat['id']: cat['name'] for cat in categories}
+        self.table_model.set_category_lookup(lookup)
+
+        items_map: dict[Any, QTreeWidgetItem] = {}
+        self.category_tree.blockSignals(True)
+        self.category_tree.clear()
+
+        all_item = QTreeWidgetItem(["Все категории"])
+        all_item.setData(0, Qt.UserRole, self.ALL_CATEGORIES)
+        self.category_tree.addTopLevelItem(all_item)
+        items_map[self.ALL_CATEGORIES] = all_item
+
+        uncategorized_item = QTreeWidgetItem(["Без категории"])
+        uncategorized_item.setData(0, Qt.UserRole, self.UNCATEGORIZED)
+        self.category_tree.addTopLevelItem(uncategorized_item)
+        items_map[self.UNCATEGORIZED] = uncategorized_item
+
         for cat in categories:
-            self.category_filter.addItem(cat['name'], cat['id'])
-        
-        # Восстанавливаем выбор
-        index = self.category_filter.findData(current_cat)
-        if index != -1:
-            self.category_filter.setCurrentIndex(index)
-        self.category_filter.blockSignals(False)
-    
+            item = QTreeWidgetItem([cat['name']])
+            item.setData(0, Qt.UserRole, cat['id'])
+            self.category_tree.addTopLevelItem(item)
+            items_map[cat['id']] = item
+
+        target = items_map.get(current_selection)
+        if target is None:
+            target = all_item
+        self.category_tree.setCurrentItem(target)
+        self.category_tree.blockSignals(False)
+
     def refresh_data(self, *args, **kwargs):
         logging.info("Refreshing warehouse data...")
         self.load_categories()
         parts_data = self.db.get_all_parts()
-        self.table_model.set_data(parts_data)
+        self.table_model.set_parts(parts_data)
         self.filter_data() # Применяем фильтры после обновления
         logging.info("Warehouse data refreshed.")
 
-    def open_part_folder_from_table(self, proxy_index: QModelIndex):
-        source_index = self.proxy_model.mapToSource(proxy_index)
-        row_data = self.table_model.get_row(source_index.row())
+    def open_part_folder_from_table(self, index: QModelIndex):
+        row_data = self.table_model.get_row(index.row())
         if not row_data:
             return
         name = row_data.get('name', '')
@@ -156,20 +222,17 @@ class WarehouseTab(QWidget):
 
     def filter_data(self):
         search_text = self.search_input.text()
-        category_id = self.category_filter.currentData()
+        category_token = self._get_selected_category_token()
 
-        self.proxy_model.set_search_text(search_text)
-        self.proxy_model.set_category_id(category_id)
-        self.proxy_model.invalidateFilter()
-    
+        self.table_model.set_filters(search_text, category_token)
+
     def add_part(self):
         dialog = PartDialog(self.db, self.event_bus, parent=self)
         if dialog.exec():
             self.refresh_data()
 
     def edit_part_from_table(self, index: QModelIndex):
-        proxy_index = self.proxy_model.mapToSource(index)
-        part_id = self.table_model.get_id_from_index(proxy_index)
+        part_id = self.table_model.get_id_from_index(index)
         if part_id is not None:
             dialog = PartDialog(self.db, self.event_bus, part_id=part_id, parent=self)
             if dialog.exec():
@@ -198,13 +261,24 @@ class WarehouseTab(QWidget):
         if dialog.exec():
             self.event_bus.emit('parts.changed') # Обновляем всё, так как категории могли измениться
 
+    def _get_selected_category_token(self) -> Any:
+        item = self.category_tree.currentItem()
+        if not item:
+            return self.ALL_CATEGORIES
+        value = item.data(0, Qt.UserRole)
+        if value is None:
+            return self.UNCATEGORIZED
+        return value
+
+    def _on_category_selection_changed(self, current, previous):
+        self.filter_data()
+
     def show_context_menu(self, pos):
         index = self.table_view.indexAt(pos)
         if not index.isValid():
             return
 
-        proxy_index = self.proxy_model.mapToSource(index)
-        part_id = self.table_model.get_id_from_index(proxy_index)
+        part_id = self.table_model.get_id_from_index(index)
         if part_id is None:
             return
 
@@ -223,13 +297,17 @@ class WarehouseTab(QWidget):
 class TableModel(QAbstractTableModel):
     FOLDER_COLUMN = 7
 
-    def __init__(self, data=None, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self._data = data or []
         self._headers = ['Наименование', 'Артикул', 'Остаток, шт.', 'Минимум, шт.', 'Цена', 'Категория', 'Оборудование', '']
+        self._raw_parts: list[dict] = []
+        self._rows: list[dict] = []
+        self._search_text: str = ""
+        self._category_id: Any = WarehouseTab.ALL_CATEGORIES
+        self._category_lookup: dict[Any, str] = {}
 
     def rowCount(self, parent=QModelIndex()):
-        return len(self._data)
+        return len(self._rows)
 
     def columnCount(self, parent=QModelIndex()):
         return len(self._headers)
@@ -237,33 +315,60 @@ class TableModel(QAbstractTableModel):
     def data(self, index, role=Qt.DisplayRole):
         if not index.isValid():
             return None
-        
-        row_data = self._data[index.row()]
-        col = index.column()
+
+        row_entry = self._rows[index.row()]
+        row_type = row_entry.get('row_type')
+        column = index.column()
+
+        if role == ROW_TYPE_ROLE:
+            return row_type
+
+        if row_type == 'category':
+            if role == Qt.DisplayRole and column == 0:
+                return row_entry.get('category_name', '')
+            if role == Qt.FontRole:
+                font = QFont()
+                font.setBold(True)
+                return font
+            if role == Qt.BackgroundRole:
+                return QColor('#f5f5f5')
+            if role == Qt.TextAlignmentRole:
+                return Qt.AlignLeft | Qt.AlignVCenter
+            return None
+
+        part = row_entry.get('part', {})
 
         if role == Qt.DisplayRole:
-            if col == 0: return row_data.get('name')
-            if col == 1: return row_data.get('sku')
-            if col == 2: return row_data.get('qty')
-            if col == 3: return row_data.get('min_qty')
-            if col == 4: return f"{row_data.get('price', 0):.2f}"
-            if col == 5: return row_data.get('category_name')
-            if col == 6: return row_data.get('equipment_list', 'нет')
-            if col == self.FOLDER_COLUMN: return ""
+            if column == 0:
+                return part.get('name')
+            if column == 1:
+                return part.get('sku')
+            if column == 2:
+                return part.get('qty')
+            if column == 3:
+                return part.get('min_qty')
+            if column == 4:
+                return f"{part.get('price', 0):.2f}"
+            if column == 5:
+                return part.get('category_name')
+            if column == 6:
+                return part.get('equipment_list', 'нет')
+            if column == self.FOLDER_COLUMN:
+                return ""
 
         if role == Qt.UserRole:
-            return row_data.get('id')
+            return part.get('id')
 
         if role == Qt.UserRole + 1:
-            return row_data
+            return part
 
         if role == Qt.TextAlignmentRole:
-            if col in [2, 3, 4]:
+            if column in (2, 3, 4):
                 return Qt.AlignCenter
-            if col == self.FOLDER_COLUMN:
+            if column == self.FOLDER_COLUMN:
                 return Qt.AlignCenter
 
-        if role == Qt.ToolTipRole and col == self.FOLDER_COLUMN:
+        if role == Qt.ToolTipRole and column == self.FOLDER_COLUMN:
             return "Открыть папку запчасти"
 
         return None
@@ -273,58 +378,79 @@ class TableModel(QAbstractTableModel):
             return self._headers[section]
         return None
 
-    def set_data(self, data):
-        self.beginResetModel()
-        self._data = data
-        self.endResetModel()
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemIsEnabled
+        if self._rows[index.row()].get('row_type') == 'category':
+            return Qt.ItemIsEnabled
+        return super().flags(index)
+
+    def set_parts(self, parts: list[dict]):
+        self._raw_parts = parts or []
+        self._rebuild_rows()
+
+    def set_category_lookup(self, lookup: dict[Any, str]):
+        self._category_lookup = lookup or {}
+        self._rebuild_rows()
+
+    def set_filters(self, search_text: str, category_id: Any):
+        self._search_text = (search_text or "").lower()
+        self._category_id = category_id
+        self._rebuild_rows()
 
     def get_id_from_index(self, index: QModelIndex):
         if not index.isValid():
             return None
-        return self.data(index, role=Qt.UserRole)
+        row_entry = self._rows[index.row()]
+        if row_entry.get('row_type') != 'part':
+            return None
+        part = row_entry.get('part') or {}
+        return part.get('id')
 
     def get_row(self, row: int):
-        if 0 <= row < len(self._data):
-            return self._data[row]
+        if 0 <= row < len(self._rows):
+            row_entry = self._rows[row]
+            if row_entry.get('row_type') == 'part':
+                return row_entry.get('part')
         return None
 
-class CustomSortFilterProxyModel(QSortFilterProxyModel):
-    def __init__(self, db=None, parent=None):
-        super().__init__(parent)
-        self.search_text = ""
-        self.category_id = -1
-        self._db = db
+    def _rebuild_rows(self):
+        filtered: list[dict] = []
+        for part in self._raw_parts:
+            if not self._matches_category(part):
+                continue
+            if self._search_text:
+                name = str(part.get('name') or '').lower()
+                sku = str(part.get('sku') or '').lower()
+                if self._search_text not in name and self._search_text not in sku:
+                    continue
+            filtered.append(part)
 
-    def set_search_text(self, text):
-        self.search_text = text.lower()
+        filtered.sort(key=lambda item: (
+            (item.get('category_name') or '').lower(),
+            (item.get('name') or '').lower(),
+        ))
 
-    def set_category_id(self, cat_id):
-        self.category_id = cat_id
+        rows: list[dict] = []
+        current_category: Optional[str] = None
 
-    def filterAcceptsRow(self, source_row, source_parent):
-        # Категория
-        category_match = True
-        if self.category_id != -1:
-            cat_index = self.sourceModel().index(source_row, 5, source_parent)
-            cat_name = self.sourceModel().data(cat_index)
-            # Необходимо получить ID категории из данных, если это возможно,
-            # но для простоты фильтруем по имени категории
-            categories = self._db.get_part_categories() if self._db else []
-            current_category_name = ""
-            for cat in categories:
-                if cat['id'] == self.category_id:
-                    current_category_name = cat['name']
-                    break
-            category_match = (cat_name == current_category_name)
-        
-        # Текст
-        text_match = True
-        if self.search_text:
-            name_index = self.sourceModel().index(source_row, 0, source_parent)
-            sku_index = self.sourceModel().index(source_row, 1, source_parent)
-            name_data = str(self.sourceModel().data(name_index)).lower()
-            sku_data = str(self.sourceModel().data(sku_index)).lower()
-            text_match = (self.search_text in name_data) or (self.search_text in sku_data)
+        for part in filtered:
+            category_name = part.get('category_name') or ''
+            if category_name != current_category:
+                label = category_name if category_name else 'Без категории'
+                rows.append({'row_type': 'category', 'category_name': label})
+                current_category = category_name
+            rows.append({'row_type': 'part', 'part': part})
 
-        return category_match and text_match
+        self.beginResetModel()
+        self._rows = rows
+        self.endResetModel()
+
+    def _matches_category(self, part: dict) -> bool:
+        if self._category_id == WarehouseTab.ALL_CATEGORIES:
+            return True
+        part_category = part.get('category_id')
+        if self._category_id == WarehouseTab.UNCATEGORIZED:
+            return part_category in (None, "", 0)
+        return part_category == self._category_id
 

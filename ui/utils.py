@@ -3,6 +3,7 @@ import logging
 import re
 import shutil
 from pathlib import Path
+from typing import Iterable
 
 from PySide6.QtCore import QDate, QUrl
 from PySide6.QtGui import QDesktopServices
@@ -38,6 +39,56 @@ def db_string_to_qdate(db_str: str) -> QDate:
 def get_current_date_str_for_db() -> str:
     """Возвращает текущую дату в формате YYYY-MM-DD для БД."""
     return QDate.currentDate().toString("yyyy-MM-dd")
+
+
+def last_year_start_date() -> QDate:
+    """Возвращает дату, соответствующую началу периода за последний год."""
+    return QDate.currentDate().addYears(-1)
+
+
+def _collect_unique_notes(notes: Iterable[str]) -> list[str]:
+    """Возвращает уникальные заметки, сохраняя порядок и игнорируя пустые значения."""
+
+    seen: set[str] = set()
+    result: list[str] = []
+    for note in notes:
+        cleaned = (note or "").strip()
+        if not cleaned or cleaned in seen:
+            continue
+        seen.add(cleaned)
+        result.append(cleaned)
+    return result
+
+
+def build_driver_notification_message(order: dict) -> str:
+    """Формирует текст сообщения для водителя по данным заказа."""
+
+    invoice_no = (order.get("invoice_no") or "").strip()
+    invoice_line = f"Счет №{invoice_no}" if invoice_no else "Счет"
+    invoice_date = db_string_to_ui_string(order.get("invoice_date"))
+    if invoice_date:
+        invoice_line = f"{invoice_line} от {invoice_date}"
+
+    address = (order.get("delivery_address")
+               or order.get("counterparty_address")
+               or "").strip()
+
+    lines = [
+        "Привет, можно забирать:",
+        order.get("counterparty_name", ""),
+        invoice_line,
+        f"Адрес: {address}" if address else "Адрес: не указан",
+    ]
+
+    driver_notes = _collect_unique_notes([
+        order.get("counterparty_driver_note", ""),
+        order.get("driver_note", ""),
+    ])
+
+    for note in driver_notes:
+        lines.append(f"Для водителя: {note}")
+
+    return "\n".join(line for line in lines if line)
 
 
 def _sanitize_component(value: str, default: str) -> str:
