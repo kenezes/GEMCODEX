@@ -3,9 +3,9 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QMessageBox, QSplitter, QTreeWidget, QTreeWidgetItem,
                              QTableWidget, QTableWidgetItem, QHeaderView, QToolButton,
                              QLabel, QPlainTextEdit, QStyle, QCheckBox, QMenu,
-                             QAbstractItemView)
+                             QAbstractItemView, QLineEdit)
 from PySide6.QtGui import QColor
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QEvent
 
 from .equipment_category_manager_dialog import EquipmentCategoryManagerDialog
 from .equipment_dialog import EquipmentDialog
@@ -438,7 +438,8 @@ class EquipmentTab(QWidget):
         if self._parts_table_updating or not item:
             return
 
-        if item.column() != 4:
+        column = item.column()
+        if column not in (1, 2, 3, 4):
             return
 
         row = item.row()
@@ -449,28 +450,82 @@ class EquipmentTab(QWidget):
         if not part_data or part_data.get('row_type') != 'part':
             return
 
-        equipment_part_id = part_data.get('equipment_part_id')
-        if not equipment_part_id:
+        if column == 1:
+            new_sku = item.text().strip()
+            old_sku = (part_data.get('part_sku') or '').strip()
+            if new_sku == old_sku:
+                self._set_item_text(row, column, old_sku)
+                return
+            if not new_sku:
+                QMessageBox.warning(self, 'Редактирование запчасти', 'Артикул не может быть пустым.')
+                self._set_item_text(row, column, old_sku)
+                return
+            if not self._apply_part_updates(part_data, row, sku=new_sku):
+                self._set_item_text(row, column, old_sku)
             return
 
-        new_comment = item.text().strip()
-        old_comment = (part_data.get('part_comment') or '').strip()
-        if new_comment == old_comment:
+        if column == 2:
+            value_text = item.text().strip()
+            old_qty = part_data.get('installed_qty') or 0
+            if not value_text:
+                QMessageBox.warning(self, 'Редактирование запчасти', 'Количество не может быть пустым.')
+                self._set_item_text(row, column, str(old_qty))
+                return
+            try:
+                new_qty = int(value_text)
+            except ValueError:
+                QMessageBox.warning(self, 'Редактирование запчасти', 'Количество должно быть целым числом.')
+                self._set_item_text(row, column, str(old_qty))
+                return
+            if new_qty <= 0:
+                QMessageBox.warning(
+                    self,
+                    'Редактирование запчасти',
+                    'Установленное количество должно быть больше нуля.',
+                )
+                self._set_item_text(row, column, str(old_qty))
+                return
+            if new_qty == old_qty:
+                self._set_item_text(row, column, str(old_qty))
+                return
+            if not self._apply_part_updates(part_data, row, qty=new_qty):
+                self._set_item_text(row, column, str(old_qty))
             return
 
-        success, message = self.db.update_equipment_part_comment(equipment_part_id, new_comment)
-        if success:
-            part_data['part_comment'] = new_comment
+        if column == 3:
+            new_last = item.text().strip()
+            old_display = part_data.get('last_replacement_date') or ''
+            if new_last == old_display:
+                self._set_item_text(row, column, old_display)
+                return
+            if not self._apply_part_updates(part_data, row, last_replacement=new_last):
+                self._set_item_text(row, column, old_display)
             return
 
-        self._parts_table_updating = True
-        try:
-            item.setText(old_comment)
-        finally:
-            self._parts_table_updating = False
+        if column == 4:
+            equipment_part_id = part_data.get('equipment_part_id')
+            if not equipment_part_id:
+                return
 
-        if message:
-            QMessageBox.warning(self, 'Комментарий', message)
+            new_comment = item.text().strip()
+            old_comment = (part_data.get('part_comment') or '').strip()
+            if new_comment == old_comment:
+                self._set_item_text(row, column, old_comment)
+                return
+
+            success, message = self.db.update_equipment_part_comment(equipment_part_id, new_comment)
+            if success:
+                part_data['part_comment'] = new_comment
+                return
+
+            self._parts_table_updating = True
+            try:
+                item.setText(old_comment)
+            finally:
+                self._parts_table_updating = False
+
+            if message:
+                QMessageBox.warning(self, 'Комментарий', message)
 
     def _on_parts_table_cell_double_clicked(self, row: int, column: int):
         if row < 0 or row >= len(self._row_parts):
@@ -480,13 +535,15 @@ class EquipmentTab(QWidget):
         if not part_data or part_data.get('row_type') != 'part':
             return
 
-        if column == 4:
-            item = self.parts_table.item(row, column)
-            if item:
-                self.parts_table.editItem(item)
+        if column == 0:
+            self._start_name_edit(row, part_data)
             return
 
-        self._edit_attached_part(part_data)
+        if column in (1, 2, 3, 4):
+            item = self.parts_table.item(row, column)
+            if item and item.flags() & Qt.ItemIsEditable:
+                self.parts_table.editItem(item)
+            return
 
     def _populate_parts_table(self, part_tree: list[dict]):
         current_category = None
@@ -530,21 +587,22 @@ class EquipmentTab(QWidget):
         part_copy['has_descendants'] = entry.get('has_descendants', False)
         self._row_parts.insert(row_index, part_copy)
 
-        name_item = QTableWidgetItem('')
-        name_item.setFlags(Qt.ItemIsEnabled)
+        name_item = QTableWidgetItem(part_copy.get('part_name') or '')
+        name_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled)
         self.parts_table.setItem(row_index, 0, name_item)
 
         sku_item = QTableWidgetItem(part_copy.get('part_sku') or '')
-        sku_item.setFlags(Qt.ItemIsEnabled)
+        sku_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
         self.parts_table.setItem(row_index, 1, sku_item)
 
         qty_item = QTableWidgetItem(str(part_copy.get('installed_qty', '')))
-        qty_item.setFlags(Qt.ItemIsEnabled)
+        qty_item.setTextAlignment(Qt.AlignCenter)
+        qty_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
         self.parts_table.setItem(row_index, 2, qty_item)
 
         last_replacement = part_copy.get('last_replacement_date') or ''
         last_item = QTableWidgetItem(last_replacement)
-        last_item.setFlags(Qt.ItemIsEnabled)
+        last_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
         self.parts_table.setItem(row_index, 3, last_item)
 
         comment_text = part_copy.get('part_comment') or ''
@@ -600,8 +658,10 @@ class EquipmentTab(QWidget):
 
         self.parts_table.setCellWidget(row_index, 5, actions_widget)
 
-        name_widget = self._create_part_name_widget(part_copy)
+        name_widget, name_label, name_editor = self._create_part_name_widget(part_copy)
         self.parts_table.setCellWidget(row_index, 0, name_widget)
+        part_copy['_name_label'] = name_label
+        part_copy['_name_editor'] = name_editor
 
         if part_copy.get('component_equipment_id'):
             self._apply_complex_row_style(row_index, name_widget, actions_widget)
@@ -617,7 +677,89 @@ class EquipmentTab(QWidget):
 
         return row_index, part_counter
 
-    def _create_part_name_widget(self, part_data: dict) -> QWidget:
+    def _start_name_edit(self, row: int, part_data: dict):
+        editor: QLineEdit | None = part_data.get('_name_editor')
+        label: QLabel | None = part_data.get('_name_label')
+        if not editor or not label:
+            return
+
+        if editor.property('editing_active'):
+            return
+
+        editor.setProperty('editing_active', True)
+        editor.setProperty('row_index', row)
+        editor.setText(part_data.get('part_name', ''))
+        label.hide()
+        editor.show()
+        editor.setFocus()
+        editor.selectAll()
+
+    def _cancel_name_edit(self, editor: QLineEdit):
+        part_data = editor.property('part_data')
+        if isinstance(part_data, dict):
+            label: QLabel | None = part_data.get('_name_label')
+            if label:
+                label.show()
+                label.setText(part_data.get('part_name', ''))
+        editor.setText(part_data.get('part_name', '') if isinstance(part_data, dict) else '')
+        editor.hide()
+        editor.setProperty('editing_active', False)
+        editor.setProperty('row_index', None)
+
+    def _commit_name_edit(self, editor: QLineEdit):
+        if self._parts_table_updating or not isinstance(editor, QLineEdit):
+            return
+
+        if not editor.property('editing_active'):
+            return
+
+        part_data = editor.property('part_data')
+        row = editor.property('row_index')
+        editor.setProperty('editing_active', False)
+        editor.setProperty('row_index', None)
+
+        if not isinstance(part_data, dict):
+            editor.hide()
+            return
+
+        label: QLabel | None = part_data.get('_name_label')
+        if label:
+            label.show()
+        editor.hide()
+
+        new_name = editor.text().strip()
+        old_name = (part_data.get('part_name') or '').strip()
+
+        if not new_name:
+            QMessageBox.warning(self, 'Редактирование запчасти', 'Наименование не может быть пустым.')
+            editor.setText(old_name)
+            if label:
+                label.setText(old_name)
+            return
+
+        if new_name == old_name:
+            editor.setText(old_name)
+            if label:
+                label.setText(old_name)
+            return
+
+        if row is None:
+            try:
+                row = self._row_parts.index(part_data)
+            except ValueError:
+                row = -1
+
+        success = self._apply_part_updates(part_data, row, name=new_name)
+        if success:
+            if label:
+                label.setText(new_name)
+            editor.setText(new_name)
+        else:
+            editor.setText(old_name)
+            if label:
+                label.setText(old_name)
+
+    def _create_part_name_widget(self, part_data: dict) -> tuple[QWidget, QLabel, QLineEdit]:
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(4, 0, 0, 0)
@@ -642,8 +784,141 @@ class EquipmentTab(QWidget):
 
         name_label = QLabel(part_data.get('part_name', ''))
         layout.addWidget(name_label)
+
+        name_editor = QLineEdit(part_data.get('part_name', ''))
+        name_editor.hide()
+        name_editor.setProperty('part_data', part_data)
+        name_editor.setProperty('editing_active', False)
+        name_editor.setProperty('row_index', None)
+        name_editor.installEventFilter(self)
+        name_editor.editingFinished.connect(lambda editor=name_editor: self._commit_name_edit(editor))
+        layout.addWidget(name_editor)
+
         layout.addStretch()
-        return container
+        return container, name_label, name_editor
+
+    def _set_item_text(self, row: int, column: int, text: str):
+        if row is None or row < 0:
+            return
+        item = self.parts_table.item(row, column)
+        if not item:
+            return
+        self._parts_table_updating = True
+        try:
+            item.setText(text)
+        finally:
+            self._parts_table_updating = False
+
+    def _apply_part_updates(
+        self,
+        part_data: dict,
+        row: int | None,
+        *,
+        name: str | None = None,
+        sku: str | None = None,
+        qty: int | None = None,
+        last_replacement: str | None = None,
+    ) -> bool:
+        equipment_part_id = part_data.get('equipment_part_id')
+        if not equipment_part_id:
+            return False
+
+        current_name = part_data.get('part_name') or ''
+        current_sku = part_data.get('part_sku') or ''
+        current_qty = part_data.get('installed_qty') or 0
+        current_last_override = part_data.get('last_replacement_override') or None
+        current_last_display = part_data.get('last_replacement_date') or ''
+
+        target_name = current_name if name is None else name
+        target_sku = current_sku if sku is None else sku
+
+        if qty is None:
+            target_qty = current_qty
+        else:
+            try:
+                target_qty = int(qty)
+            except (TypeError, ValueError):
+                QMessageBox.warning(self, 'Редактирование запчасти', 'Количество должно быть целым числом.')
+                return False
+            if target_qty <= 0:
+                QMessageBox.warning(
+                    self,
+                    'Редактирование запчасти',
+                    'Установленное количество должно быть больше нуля.',
+                )
+                return False
+
+        if last_replacement is None:
+            target_last_override = current_last_override
+        else:
+            target_last_override = (last_replacement or '').strip() or None
+
+        if (
+            target_name == current_name
+            and target_sku == current_sku
+            and target_qty == current_qty
+            and (target_last_override or None) == (current_last_override or None)
+        ):
+            return True
+
+        success, message, payload = self.db.update_attached_part(
+            equipment_part_id,
+            target_name,
+            target_sku,
+            target_qty,
+            target_last_override,
+        )
+
+        if not success:
+            if message:
+                QMessageBox.warning(self, 'Редактирование запчасти', message)
+            return False
+
+        old_name = current_name
+        old_sku = current_sku
+
+        if old_name != target_name or old_sku != target_sku:
+            move_part_folder_on_rename(old_name, old_sku, target_name, target_sku, self)
+
+        part_data['part_name'] = target_name
+        part_data['part_sku'] = target_sku
+        part_data['installed_qty'] = target_qty
+        part_data['last_replacement_override'] = target_last_override
+        if target_last_override is not None:
+            part_data['last_replacement_date'] = target_last_override
+        else:
+            part_data['last_replacement_date'] = current_last_display
+
+        if row is None:
+            try:
+                row = self._row_parts.index(part_data)
+            except ValueError:
+                row = -1
+
+        self._set_item_text(row, 0, target_name)
+        self._set_item_text(row, 1, target_sku)
+        self._set_item_text(row, 2, str(target_qty))
+        display_last = part_data.get('last_replacement_date') or ''
+        self._set_item_text(row, 3, display_last)
+
+        payload = payload or {}
+        target_equipment_id = payload.get('equipment_id') or part_data.get('equipment_id')
+        target_part_id = payload.get('part_id') or part_data.get('part_id')
+        name_changed = payload.get(
+            'name_changed',
+            old_name != target_name or old_sku != target_sku,
+        )
+
+        if target_equipment_id:
+            self.event_bus.emit('equipment_parts_changed', target_equipment_id)
+
+        if target_part_id:
+            self.event_bus.emit('parts.changed')
+
+        if name_changed:
+            self.event_bus.emit('equipment.changed')
+
+        return True
 
     def _toggle_component_expansion(self, equipment_part_id: int, expanded: bool):
         if expanded:
@@ -716,6 +991,7 @@ class EquipmentTab(QWidget):
             new_name,
             new_sku,
             new_qty,
+            part_data.get('last_replacement_override'),
         )
 
         if not success:
@@ -1010,4 +1286,15 @@ class EquipmentTab(QWidget):
     def on_parts_changed(self):
         if self.current_equipment_id:
             self.load_parts_for_equipment(self.current_equipment_id)
+
+    def eventFilter(self, obj, event):
+        if isinstance(obj, QLineEdit) and obj.property('part_data'):
+            if event.type() == QEvent.KeyPress and obj.property('editing_active'):
+                if event.key() == Qt.Key_Escape:
+                    self._cancel_name_edit(obj)
+                    return True
+                if event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                    obj.clearFocus()
+                    return True
+        return super().eventFilter(obj, event)
 
