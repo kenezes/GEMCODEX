@@ -109,7 +109,7 @@ class PartDialog(QDialog):
                 )
             else:
                 # Add new part
-                success, message = self.db.add_part(
+                success, message, _ = self.db.add_part(
                     name, sku, qty, min_qty, price, category_id
                 )
 

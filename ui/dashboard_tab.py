@@ -23,7 +23,7 @@ from PySide6.QtCore import Qt, QUrl
 
 from ui.order_dialog import OrderDialog
 from ui.task_dialog import TaskDialog
-from ui.utils import db_string_to_ui_string
+from ui.utils import build_driver_notification_message, db_string_to_ui_string
 
 class DashboardTab(QWidget):
     def __init__(self, db, event_bus, main_window):
@@ -483,19 +483,23 @@ class DashboardTab(QWidget):
         if not phone_number:
             return
 
-        invoice_no = order.get('invoice_no', '')
-        invoice_date = db_string_to_ui_string(order.get('invoice_date'))
-        invoice_line = f"Счет №{invoice_no}" if invoice_no else "Счет"
-        if invoice_date:
-            invoice_line = f"{invoice_line} от {invoice_date}"
+        order_payload = dict(order)
+        order_id = order_payload.get('id')
+        if order_id is not None:
+            details = self.db.get_order_with_details(order_id)
+            if details:
+                order_payload.update(details)
+                if (not order_payload.get('delivery_address')
+                        and details.get('counterparty_id')):
+                    counterparty = self.db.get_counterparty_by_id(details['counterparty_id'])
+                    if counterparty:
+                        default_address = counterparty.get('default_address') or counterparty.get('address')
+                        if default_address:
+                            order_payload['delivery_address'] = default_address
+                        if counterparty.get('address'):
+                            order_payload.setdefault('counterparty_address', counterparty['address'])
 
-        address = order.get('delivery_address') or order.get('counterparty_address') or ""
-        message = (
-            "Привет, можно забирать:\n"
-            f"{order.get('counterparty_name', '')}\n"
-            f"{invoice_line}\n"
-            f"Адрес: {address}"
-        )
+        message = build_driver_notification_message(order_payload)
 
         QGuiApplication.clipboard().setText(message)
         url = QUrl(f"https://wa.me/{phone_number}?text={quote(message, safe='')}")

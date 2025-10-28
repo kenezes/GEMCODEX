@@ -24,6 +24,7 @@ class CounterpartyDialog(QDialog):
         self.email_input = QLineEdit()
         self.note_input = QTextEdit()
         self.note_input.setAcceptRichText(False)
+        self.driver_note_input = QLineEdit()
 
         self.address_list = QListWidget()
         self.address_list.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -60,6 +61,7 @@ class CounterpartyDialog(QDialog):
         form_layout.addRow("Телефон:", self.phone_input)
         form_layout.addRow("Email:", self.email_input)
         form_layout.addRow("Комментарий:", self.note_input)
+        form_layout.addRow("Для водителя:", self.driver_note_input)
         
         self.layout.addLayout(form_layout)
 
@@ -81,6 +83,7 @@ class CounterpartyDialog(QDialog):
             self.phone_input.setText(data.get('phone', ''))
             self.email_input.setText(data.get('email', ''))
             self.note_input.setPlainText(data.get('note', ''))
+            self.driver_note_input.setText(data.get('driver_note', ''))
             self._populate_addresses(data)
         else:
             self.address_list.clear()
@@ -206,7 +209,8 @@ class CounterpartyDialog(QDialog):
             "contact_person": self.contact_person_input.text().strip(),
             "phone": self.phone_input.text().strip(),
             "email": self.email_input.text().strip(),
-            "note": self.note_input.toPlainText().strip()
+            "note": self.note_input.toPlainText().strip(),
+            "driver_note": self.driver_note_input.text().strip(),
         }
 
         if self.counterparty_id:

@@ -18,7 +18,12 @@ from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QMode
 from .edit_replacement_dialog import EditReplacementDialog
 from .order_dialog import OrderDialog
 from .task_dialog import TaskDialog
-from .utils import db_string_to_ui_string, qdate_to_db_string, apply_table_compact_style
+from .utils import (
+    apply_table_compact_style,
+    db_string_to_ui_string,
+    last_year_start_date,
+    qdate_to_db_string,
+)
 
 
 class ReplacementsTableModel(QAbstractTableModel):
@@ -295,7 +300,7 @@ class ReplacementsHistoryView(QWidget):
 
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setCalendarPopup(True)
-        self.start_date_edit.setDate(QDate.currentDate().addMonths(-1))
+        self.start_date_edit.setDate(last_year_start_date())
 
         self.end_date_edit = QDateEdit()
         self.end_date_edit.setCalendarPopup(True)
@@ -510,7 +515,7 @@ class OrdersHistoryView(QWidget):
 
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setCalendarPopup(True)
-        self.start_date_edit.setDate(QDate.currentDate().addMonths(-1))
+        self.start_date_edit.setDate(last_year_start_date())
 
         self.end_date_edit = QDateEdit()
         self.end_date_edit.setCalendarPopup(True)
@@ -716,7 +721,7 @@ class TasksHistoryView(QWidget):
 
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setCalendarPopup(True)
-        self.start_date_edit.setDate(QDate.currentDate().addMonths(-1))
+        self.start_date_edit.setDate(last_year_start_date())
 
         self.end_date_edit = QDateEdit()
         self.end_date_edit.setCalendarPopup(True)
@@ -954,7 +959,7 @@ class KnifeOperationsHistoryView(QWidget):
 
         self.start_date_edit = QDateEdit()
         self.start_date_edit.setCalendarPopup(True)
-        self.start_date_edit.setDate(QDate.currentDate().addMonths(-1))
+        self.start_date_edit.setDate(last_year_start_date())
 
         self.end_date_edit = QDateEdit()
         self.end_date_edit.setCalendarPopup(True)

@@ -2,7 +2,8 @@ import logging
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QMessageBox, QSplitter, QTreeWidget, QTreeWidgetItem,
                              QTableWidget, QTableWidgetItem, QHeaderView, QToolButton,
-                             QLabel, QPlainTextEdit, QStyle, QCheckBox, QMenu)
+                             QLabel, QPlainTextEdit, QStyle, QCheckBox, QMenu,
+                             QAbstractItemView)
 from PySide6.QtGui import QColor
 from PySide6.QtCore import Qt, QSize
 
@@ -28,6 +29,7 @@ class EquipmentTab(QWidget):
         self._comment_dirty = False
         self._expanded_components: set[int] = set()
         self._row_parts: list[dict | None] = []
+        self._parts_table_updating = False
         self.init_ui()
         self.load_tree_data()
         self.update_buttons_state()
@@ -108,16 +110,19 @@ class EquipmentTab(QWidget):
         parts_buttons_layout.addStretch()
         
         self.parts_table = QTableWidget()
-        self.parts_table.setColumnCount(5)
+        self.parts_table.setColumnCount(6)
         self.parts_table.setHorizontalHeaderLabels([
             "Наименование",
             "Артикул",
             "Установлено, шт.",
             "Последняя замена",
+            "Комментарий",
             "Действия",
         ])
         self.parts_table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.parts_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.parts_table.setEditTriggers(
+            QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed
+        )
         self.parts_table.setContextMenuPolicy(Qt.CustomContextMenu)
 
         header = self.parts_table.horizontalHeader()
@@ -131,6 +136,8 @@ class EquipmentTab(QWidget):
         parts_buttons_layout.addWidget(self.only_requires_parts_checkbox)
         right_layout.addLayout(parts_buttons_layout)
         right_layout.addWidget(self.parts_table)
+
+        self.parts_table.itemChanged.connect(self._on_part_item_changed)
 
         splitter.addWidget(left_panel)
         splitter.addWidget(right_panel)
@@ -353,23 +360,27 @@ class EquipmentTab(QWidget):
             QMessageBox.critical(self, "Ошибка", message)
 
     def load_parts_for_equipment(self, equipment_id):
-        self.parts_table.setRowCount(0)
-        self.parts_table.clearSpans()
-        self._row_parts.clear()
+        self._parts_table_updating = True
+        try:
+            self.parts_table.setRowCount(0)
+            self.parts_table.clearSpans()
+            self._row_parts.clear()
 
-        if equipment_id is None:
-            return
+            if equipment_id is None:
+                return
 
-        part_tree = self._build_part_tree(equipment_id, level=0, parent_equipment_id=None)
-        visible_part_ids = self._collect_part_ids(part_tree)
-        if visible_part_ids:
-            self._expanded_components.intersection_update(visible_part_ids)
+            part_tree = self._build_part_tree(equipment_id, level=0, parent_equipment_id=None)
+            visible_part_ids = self._collect_part_ids(part_tree)
+            if visible_part_ids:
+                self._expanded_components.intersection_update(visible_part_ids)
 
-        filter_active = self.only_requires_parts_checkbox.isChecked()
-        if filter_active:
-            part_tree = self._filter_part_tree(part_tree)
+            filter_active = self.only_requires_parts_checkbox.isChecked()
+            if filter_active:
+                part_tree = self._filter_part_tree(part_tree)
 
-        self._populate_parts_table(part_tree)
+            self._populate_parts_table(part_tree)
+        finally:
+            self._parts_table_updating = False
 
     def _build_part_tree(self, equipment_id: int, level: int, parent_equipment_id: int | None) -> list[dict]:
         tree: list[dict] = []
@@ -383,6 +394,8 @@ class EquipmentTab(QWidget):
                 'installed_qty': part['installed_qty'],
                 'requires_replacement': part.get('requires_replacement'),
                 'category_name': part.get('category_name'),
+                'part_comment': part.get('part_comment'),
+                'last_replacement_override': part.get('last_replacement_override'),
                 'last_replacement_date': part.get('last_replacement_date') or '',
                 'equipment_id': equipment_id,
                 'component_equipment_id': component_equipment_id,
@@ -419,6 +432,44 @@ class EquipmentTab(QWidget):
                 new_entry['children'] = filtered_children
                 filtered.append(new_entry)
         return filtered
+
+    def _on_part_item_changed(self, item: QTableWidgetItem):
+        if self._parts_table_updating or not item:
+            return
+
+        if item.column() != 4:
+            return
+
+        row = item.row()
+        if row < 0 or row >= len(self._row_parts):
+            return
+
+        part_data = self._row_parts[row]
+        if not part_data or part_data.get('row_type') != 'part':
+            return
+
+        equipment_part_id = part_data.get('equipment_part_id')
+        if not equipment_part_id:
+            return
+
+        new_comment = item.text().strip()
+        old_comment = (part_data.get('part_comment') or '').strip()
+        if new_comment == old_comment:
+            return
+
+        success, message = self.db.update_equipment_part_comment(equipment_part_id, new_comment)
+        if success:
+            part_data['part_comment'] = new_comment
+            return
+
+        self._parts_table_updating = True
+        try:
+            item.setText(old_comment)
+        finally:
+            self._parts_table_updating = False
+
+        if message:
+            QMessageBox.warning(self, 'Комментарий', message)
 
     def _populate_parts_table(self, part_tree: list[dict]):
         current_category = None
@@ -479,6 +530,11 @@ class EquipmentTab(QWidget):
         last_item.setFlags(Qt.ItemIsEnabled)
         self.parts_table.setItem(row_index, 3, last_item)
 
+        comment_text = part_copy.get('part_comment') or ''
+        comment_item = QTableWidgetItem(comment_text)
+        comment_item.setFlags(Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsEditable)
+        self.parts_table.setItem(row_index, 4, comment_item)
+
         requires_button = QPushButton()
         self._update_requires_replacement_button(requires_button, part_copy)
         requires_button.clicked.connect(
@@ -525,7 +581,7 @@ class EquipmentTab(QWidget):
         actions_layout.addStretch()
         actions_layout.addWidget(requires_button)
 
-        self.parts_table.setCellWidget(row_index, 4, actions_widget)
+        self.parts_table.setCellWidget(row_index, 5, actions_widget)
 
         name_widget = self._create_part_name_widget(part_copy)
         self.parts_table.setCellWidget(row_index, 0, name_widget)

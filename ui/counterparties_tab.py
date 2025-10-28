@@ -137,7 +137,15 @@ class CounterpartyTableModel(QAbstractTableModel):
     def __init__(self, data=None, parent=None):
         super().__init__(parent)
         self._data = data or []
-        self._headers = ["Наименование", "Адрес", "Контактное лицо", "Телефон", "Email", "Комментарий"]
+        self._headers = [
+            "Наименование",
+            "Адрес",
+            "Контактное лицо",
+            "Телефон",
+            "Email",
+            "Комментарий",
+            "Для водителя",
+        ]
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._data)
@@ -159,6 +167,7 @@ class CounterpartyTableModel(QAbstractTableModel):
             if col == 3: return row_data.get('phone')
             if col == 4: return row_data.get('email')
             if col == 5: return row_data.get('note')
+            if col == 6: return row_data.get('driver_note')
         
         if role == Qt.UserRole:
             return row_data.get('id')
