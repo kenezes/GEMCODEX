@@ -3,6 +3,7 @@
 **/data
 **/__pycache__
 *.pyc
+**/ui/__pycache__
 backup/app_backup_20251028_115759.zip
 __pycache__/database.cpython-313.pyc
 __pycache__/event_bus.cpython-313.pyc
