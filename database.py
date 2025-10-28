@@ -1578,19 +1578,32 @@ class Database:
             )
             return False, f"Ошибка базы данных: {e}"
 
-    def update_attached_part(self, equipment_part_id: int, name: str, sku: str, installed_qty: int):
-        """Обновляет данные привязанной запчасти (наименование, артикул, количество)."""
+    def update_attached_part(
+        self,
+        equipment_part_id: int,
+        name: str,
+        sku: str,
+        installed_qty: int,
+        last_replacement_override: str | None = None,
+    ):
+        """Обновляет данные привязанной запчасти (наименование, артикул, количество, последнюю замену)."""
         if not self.conn:
             return False, "Нет подключения к БД.", {}
 
         if installed_qty <= 0:
             return False, "Установленное количество должно быть больше нуля.", {}
 
+        last_replacement_value = (last_replacement_override or "").strip() or None
+
         try:
             with self.conn:
                 cursor = self.conn.cursor()
                 link = cursor.execute(
-                    "SELECT equipment_id, part_id, installed_qty FROM equipment_parts WHERE id = ?",
+                    """
+                    SELECT equipment_id, part_id, installed_qty, last_replacement_override
+                    FROM equipment_parts
+                    WHERE id = ?
+                    """,
                     (equipment_part_id,),
                 ).fetchone()
 
@@ -1606,8 +1619,8 @@ class Database:
                     return False, "Запчасть не найдена.", {}
 
                 cursor.execute(
-                    "UPDATE equipment_parts SET installed_qty = ? WHERE id = ?",
-                    (installed_qty, equipment_part_id),
+                    "UPDATE equipment_parts SET installed_qty = ?, last_replacement_override = ? WHERE id = ?",
+                    (installed_qty, last_replacement_value, equipment_part_id),
                 )
 
                 name_changed = name != part_row["name"] or sku != part_row["sku"]
@@ -1633,7 +1646,7 @@ class Database:
             self._log_action(
                 "Обновлена привязанная запчасть #{part_id} к оборудованию #{equipment_id}: "
                 "имя '{old_name}' → '{new_name}', артикул '{old_sku}' → '{new_sku}', "
-                "количество {old_qty} → {new_qty}".format(
+                "количество {old_qty} → {new_qty}, последняя замена '{old_last}' → '{new_last}'".format(
                     part_id=link["part_id"],
                     equipment_id=link["equipment_id"],
                     old_name=part_row["name"],
@@ -1642,6 +1655,8 @@ class Database:
                     new_sku=sku,
                     old_qty=link["installed_qty"],
                     new_qty=installed_qty,
+                    old_last=link["last_replacement_override"] or "",
+                    new_last=last_replacement_value or "",
                 )
             )
 
