@@ -3,8 +3,8 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QMessageBox, QSplitter, QTreeWidget, QTreeWidgetItem,
                              QTableWidget, QTableWidgetItem, QHeaderView, QToolButton,
                              QLabel, QPlainTextEdit, QStyle, QCheckBox, QMenu,
-                             QAbstractItemView, QLineEdit)
-from PySide6.QtGui import QColor
+                             QAbstractItemView, QLineEdit, QApplication)
+from PySide6.QtGui import QColor, QPalette
 from PySide6.QtCore import Qt, QSize, QEvent
 
 from .equipment_category_manager_dialog import EquipmentCategoryManagerDialog
@@ -788,6 +788,12 @@ class EquipmentTab(QWidget):
         layout.addWidget(name_label)
 
         name_editor = QLineEdit(part_data.get('part_name', ''))
+        editor_palette = name_editor.palette()
+        app_palette = QApplication.palette(name_editor)
+        editor_palette.setColor(QPalette.Base, app_palette.color(QPalette.Base))
+        editor_palette.setColor(QPalette.Text, app_palette.color(QPalette.Text))
+        name_editor.setPalette(editor_palette)
+        name_editor.setAutoFillBackground(True)
         name_editor.hide()
         name_editor.setProperty('part_data', part_data)
         name_editor.setProperty('editing_active', False)
