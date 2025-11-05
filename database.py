@@ -353,6 +353,13 @@ class Database:
             self.conn.commit()
             logging.info("Database migrated to version 14.")
 
+        if user_version < 15:
+            logging.info("Applying migration to version 15...")
+            self._apply_migration_v15()
+            cursor.execute("PRAGMA user_version = 15;")
+            self.conn.commit()
+            logging.info("Database migrated to version 15.")
+
 
     def _apply_migration_v1(self):
         """Схема БД версии 1."""
@@ -808,6 +815,33 @@ class Database:
         except sqlite3.OperationalError as exc:
             logging.info("Migration v14: колонка equipment_parts.last_replacement_override уже существует: %s", exc)
 
+    def _apply_migration_v15(self):
+        """Добавляет поддержку групп аналогов для запчастей."""
+        if not self.conn:
+            return
+
+        cursor = self.conn.cursor()
+
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS part_analog_groups (
+                id INTEGER PRIMARY KEY,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        try:
+            cursor.execute(
+                "ALTER TABLE parts ADD COLUMN analog_group_id INTEGER REFERENCES part_analog_groups(id)"
+            )
+        except sqlite3.OperationalError as exc:
+            logging.info("Migration v15: колонка parts.analog_group_id уже существует: %s", exc)
+
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_parts_analog_group ON parts(analog_group_id)"
+        )
+
     def backup_database(self) -> tuple[bool, str]:
         if not self.conn: return False, "Нет подключения к базе данных."
         import time
@@ -908,7 +942,24 @@ class Database:
             SELECT p.id, p.name, p.sku, p.qty, p.min_qty, p.price, p.category_id,
                    pc.name as category_name,
                    (SELECT GROUP_CONCAT(eq.name, ', ') FROM equipment_parts ep
-                    JOIN equipment eq ON ep.equipment_id = eq.id WHERE ep.part_id = p.id) as equipment_list
+                    JOIN equipment eq ON ep.equipment_id = eq.id WHERE ep.part_id = p.id) as equipment_list,
+                   p.analog_group_id,
+                   (
+                        SELECT COUNT(*)
+                        FROM parts pa
+                        WHERE pa.analog_group_id = p.analog_group_id
+                    ) as analog_group_size,
+                   (
+                        SELECT GROUP_CONCAT(
+                            pa.name || CASE
+                                WHEN pa.sku IS NOT NULL AND pa.sku != '' THEN ' (' || pa.sku || ')'
+                                ELSE ''
+                            END,
+                            ', '
+                        )
+                        FROM parts pa
+                        WHERE pa.analog_group_id = p.analog_group_id AND pa.id != p.id
+                    ) as analog_names
             FROM parts p LEFT JOIN part_categories pc ON p.category_id = pc.id
             GROUP BY p.id ORDER BY p.name
         """
@@ -1013,6 +1064,7 @@ class Database:
                 cursor.execute("DELETE FROM knife_tracking WHERE part_id = ?", (part_id,))
                 deleted_tracking_rows = cursor.rowcount
                 cursor.execute("DELETE FROM parts WHERE id = ?", (part_id,))
+                self._cleanup_orphan_analog_groups(cursor)
 
             if deleted_status_rows or deleted_sharpen_rows or deleted_tracking_rows:
                 self._log_action(
@@ -1476,8 +1528,25 @@ class Database:
                            SELECT MAX(r.date)
                            FROM replacements r
                            WHERE r.part_id = p.id AND r.equipment_id = ep.equipment_id
-                       )
-                   ) as last_replacement_date
+                        )
+                   ) as last_replacement_date,
+                   p.analog_group_id,
+                   (
+                        SELECT COUNT(*)
+                        FROM parts pa
+                        WHERE pa.analog_group_id = p.analog_group_id
+                    ) as analog_group_size,
+                   (
+                        SELECT GROUP_CONCAT(
+                            pa.name || CASE
+                                WHEN pa.sku IS NOT NULL AND pa.sku != '' THEN ' (' || pa.sku || ')'
+                                ELSE ''
+                            END,
+                            ', '
+                        )
+                        FROM parts pa
+                        WHERE pa.analog_group_id = p.analog_group_id AND pa.id != p.id
+                    ) as analog_names
             FROM equipment_parts ep
                 JOIN parts p ON ep.part_id = p.id
                 LEFT JOIN part_categories pc ON p.category_id = pc.id
@@ -1486,6 +1555,158 @@ class Database:
             ORDER BY pc.name IS NULL, pc.name, p.name
         """
         return self.fetchall(query, (equipment_id,))
+
+    def _cleanup_orphan_analog_groups(self, cursor: sqlite3.Cursor | None = None):
+        if not self.conn:
+            return
+
+        local_cursor = cursor or self.conn.cursor()
+        local_cursor.execute(
+            """
+            DELETE FROM part_analog_groups
+            WHERE id NOT IN (
+                SELECT DISTINCT analog_group_id FROM parts WHERE analog_group_id IS NOT NULL
+            )
+            """
+        )
+
+    def set_parts_as_analogs(self, part_ids: list[int]):
+        if not self.conn:
+            return False, "Нет подключения к базе данных."
+
+        unique_ids = sorted({int(pid) for pid in part_ids if pid})
+        if len(unique_ids) < 2:
+            return False, "Для создания группы аналогов выберите минимум две запчасти."
+
+        placeholders = ",".join("?" for _ in unique_ids)
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                rows = cursor.execute(
+                    f"SELECT id, analog_group_id FROM parts WHERE id IN ({placeholders})",
+                    tuple(unique_ids),
+                ).fetchall()
+
+                if len(rows) != len(unique_ids):
+                    found_ids = {row["id"] for row in rows}
+                    missing = sorted(set(unique_ids) - found_ids)
+                    return False, "Запчасти не найдены: " + ", ".join(map(str, missing))
+
+                old_group_ids = {
+                    row["analog_group_id"] for row in rows if row["analog_group_id"] is not None
+                }
+
+                cursor.execute(
+                    f"UPDATE parts SET analog_group_id = NULL WHERE id IN ({placeholders})",
+                    tuple(unique_ids),
+                )
+
+                cursor.execute("INSERT INTO part_analog_groups DEFAULT VALUES")
+                group_id = cursor.lastrowid
+
+                cursor.execute(
+                    f"UPDATE parts SET analog_group_id = ? WHERE id IN ({placeholders})",
+                    (group_id, *unique_ids),
+                )
+
+                if old_group_ids:
+                    for group_id_to_check in old_group_ids:
+                        cursor.execute(
+                            "DELETE FROM part_analog_groups WHERE id = ? AND NOT EXISTS (SELECT 1 FROM parts WHERE analog_group_id = ?)",
+                            (group_id_to_check, group_id_to_check),
+                        )
+
+                self._log_action(
+                    "Сформирована группа аналогов #%s для запчастей: %s"
+                    % (group_id, ", ".join(map(str, unique_ids)))
+                )
+
+            return True, "Запчасти объединены в группу аналогов."
+        except sqlite3.Error as exc:
+            logging.error("Ошибка при создании группы аналогов: %s", exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}"
+
+    def get_analogs_for_part(self, part_id: int):
+        query = """
+            SELECT p2.id, p2.name, p2.sku, p2.qty
+            FROM parts p1
+            JOIN parts p2 ON p1.analog_group_id = p2.analog_group_id
+            WHERE p1.id = ? AND p2.id != ?
+            ORDER BY p2.name
+        """
+        return self.fetchall(query, (part_id, part_id))
+
+    def replace_equipment_part_with_analog(self, equipment_part_id: int, new_part_id: int):
+        if not self.conn:
+            return False, "Нет подключения к базе данных.", {}
+
+        try:
+            with self.conn:
+                cursor = self.conn.cursor()
+                link = cursor.execute(
+                    """
+                    SELECT equipment_id, part_id
+                    FROM equipment_parts
+                    WHERE id = ?
+                    """,
+                    (equipment_part_id,),
+                ).fetchone()
+
+                if not link:
+                    return False, "Привязка запчасти не найдена.", {}
+
+                if link["part_id"] == new_part_id:
+                    return False, "Указанный аналог уже установлен.", {}
+
+                if not cursor.execute(
+                    "SELECT 1 FROM parts WHERE id = ?",
+                    (new_part_id,),
+                ).fetchone():
+                    return False, "Аналог не найден.", {}
+
+                analog_pair = cursor.execute(
+                    """
+                    SELECT 1
+                    FROM parts p1
+                    JOIN parts p2 ON p1.analog_group_id = p2.analog_group_id
+                    WHERE p1.id = ? AND p2.id = ?
+                    """,
+                    (link["part_id"], new_part_id),
+                ).fetchone()
+
+                if not analog_pair:
+                    return False, "Выбранная запчасть не является аналогом текущей.", {}
+
+                duplicate = cursor.execute(
+                    "SELECT 1 FROM equipment_parts WHERE equipment_id = ? AND part_id = ?",
+                    (link["equipment_id"], new_part_id),
+                ).fetchone()
+
+                if duplicate:
+                    return False, "Аналог уже привязан к данному оборудованию.", {}
+
+                cursor.execute(
+                    "UPDATE equipment_parts SET part_id = ? WHERE id = ?",
+                    (new_part_id, equipment_part_id),
+                )
+
+                self._log_action(
+                    f"Запчасть #{link['part_id']} заменена на аналог #{new_part_id} на оборудовании #{link['equipment_id']}"
+                )
+
+                payload = {
+                    "equipment_id": link["equipment_id"],
+                    "old_part_id": link["part_id"],
+                    "new_part_id": new_part_id,
+                }
+
+            return True, "Запчасть заменена на выбранный аналог.", payload
+        except sqlite3.Error as exc:
+            logging.error(
+                "Ошибка при замене запчасти на аналог #%s: %s", equipment_part_id, exc, exc_info=True
+            )
+            return False, f"Ошибка базы данных: {exc}", {}
     def attach_part_to_equipment(
         self,
         equipment_id,

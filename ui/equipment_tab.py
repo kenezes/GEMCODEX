@@ -402,6 +402,9 @@ class EquipmentTab(QWidget):
                 'component_equipment_id': component_equipment_id,
                 'level': level,
                 'parent_equipment_id': parent_equipment_id,
+                'analog_group_id': part.get('analog_group_id'),
+                'analog_group_size': part.get('analog_group_size'),
+                'analog_names': part.get('analog_names'),
             }
 
             children: list[dict] = []
@@ -956,6 +959,21 @@ class EquipmentTab(QWidget):
             return
 
         menu = QMenu(self)
+
+        part_id = part_data.get('part_id')
+        analogs = self.db.get_analogs_for_part(part_id) if part_id else []
+        if analogs:
+            analogs_menu = menu.addMenu('Заменить на аналог')
+            for analog in analogs:
+                label = analog.get('name') or 'Без названия'
+                sku = (analog.get('sku') or '').strip()
+                if sku:
+                    label = f"{label} ({sku})"
+                action = analogs_menu.addAction(label)
+                action.triggered.connect(
+                    lambda checked=False, analog_id=analog.get('id'), data=part_data: self._replace_with_analog(data, analog_id)
+                )
+
         edit_action = menu.addAction('Редактировать привязанную запчасть')
         edit_action.triggered.connect(lambda: self._edit_attached_part(part_data))
 
@@ -973,6 +991,31 @@ class EquipmentTab(QWidget):
             set_action.triggered.connect(lambda: self._set_complex_component(part_data))
 
         menu.exec(self.parts_table.viewport().mapToGlobal(position))
+
+    def _replace_with_analog(self, part_data: dict, analog_part_id: int | None):
+        if not analog_part_id:
+            return
+
+        equipment_part_id = part_data.get('equipment_part_id')
+        if not equipment_part_id:
+            return
+
+        success, message, payload = self.db.replace_equipment_part_with_analog(equipment_part_id, analog_part_id)
+        if not success:
+            QMessageBox.warning(self, 'Замена на аналог', message)
+            return
+
+        QMessageBox.information(self, 'Замена на аналог', message)
+
+        payload = payload or {}
+        equipment_id = payload.get('equipment_id') or part_data.get('equipment_id')
+        if equipment_id:
+            self.event_bus.emit('equipment_parts_changed', equipment_id)
+
+        self.event_bus.emit('parts.changed')
+
+        if self.current_equipment_id:
+            self.load_parts_for_equipment(self.current_equipment_id)
 
     def _edit_attached_part(self, part_data: dict):
         equipment_part_id = part_data.get('equipment_part_id')

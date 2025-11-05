@@ -152,6 +152,7 @@ class WarehouseTab(QWidget):
 
     def _setup_table(self):
         self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table_view.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table_view.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table_view.setAlternatingRowColors(True)
         self.table_view.setSortingEnabled(True)
@@ -278,11 +279,33 @@ class WarehouseTab(QWidget):
         if not index.isValid():
             return
 
+        row = index.row()
+        if self.table_model.get_row_type(row) != 'part':
+            return
+
         part_id = self.table_model.get_id_from_index(index)
         if part_id is None:
             return
 
         menu = QMenu(self)
+
+        selected_rows = [
+            idx.row()
+            for idx in self.table_view.selectionModel().selectedRows()
+            if self.table_model.get_row_type(idx.row()) == 'part'
+        ]
+        if row not in selected_rows:
+            selected_rows.append(row)
+
+        selected_part_ids = self.table_model.get_part_ids_from_rows(selected_rows)
+        unique_part_ids = sorted(set(selected_part_ids))
+
+        if len(unique_part_ids) >= 2:
+            analogs_action = QAction("Сделать аналогами", self)
+            analogs_action.triggered.connect(lambda: self.make_parts_analogs(unique_part_ids))
+            menu.addAction(analogs_action)
+            menu.addSeparator()
+
         edit_action = QAction("Редактировать", self)
         edit_action.triggered.connect(lambda: self.edit_part_from_table(index))
         menu.addAction(edit_action)
@@ -290,8 +313,17 @@ class WarehouseTab(QWidget):
         delete_action = QAction("Удалить", self)
         delete_action.triggered.connect(lambda: self.delete_part(part_id))
         menu.addAction(delete_action)
-        
+
         menu.exec(self.table_view.viewport().mapToGlobal(pos))
+
+    def make_parts_analogs(self, part_ids: list[int]):
+        success, message = self.db.set_parts_as_analogs(part_ids)
+        if success:
+            QMessageBox.information(self, "Аналоги", message)
+            self.event_bus.emit('parts.changed')
+            self.refresh_data()
+        else:
+            QMessageBox.warning(self, "Аналоги", message)
 
 
 class TableModel(QAbstractTableModel):
@@ -305,6 +337,7 @@ class TableModel(QAbstractTableModel):
         self._search_text: str = ""
         self._category_id: Any = WarehouseTab.ALL_CATEGORIES
         self._category_lookup: dict[Any, str] = {}
+        self._analog_color_cache: dict[int, QColor] = {}
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._rows)
@@ -337,6 +370,8 @@ class TableModel(QAbstractTableModel):
             return None
 
         part = row_entry.get('part', {})
+        analog_group_id = part.get('analog_group_id')
+        analog_group_size = part.get('analog_group_size') or 0
 
         if role == Qt.DisplayRole:
             if column == 0:
@@ -368,8 +403,15 @@ class TableModel(QAbstractTableModel):
             if column == self.FOLDER_COLUMN:
                 return Qt.AlignCenter
 
-        if role == Qt.ToolTipRole and column == self.FOLDER_COLUMN:
-            return "Открыть папку запчасти"
+        if role == Qt.BackgroundRole and analog_group_id and analog_group_size and analog_group_size > 1:
+            return self._get_analog_color(int(analog_group_id))
+
+        if role == Qt.ToolTipRole:
+            if column == self.FOLDER_COLUMN:
+                return "Открыть папку запчасти"
+            analog_names = part.get('analog_names')
+            if analog_names and column in (0, 1):
+                return f"Аналоги: {analog_names}"
 
         return None
 
@@ -414,6 +456,23 @@ class TableModel(QAbstractTableModel):
                 return row_entry.get('part')
         return None
 
+    def get_row_type(self, row: int):
+        if 0 <= row < len(self._rows):
+            return self._rows[row].get('row_type')
+        return None
+
+    def get_part_ids_from_rows(self, rows: list[int]) -> list[int]:
+        ids: list[int] = []
+        for row in rows:
+            if 0 <= row < len(self._rows):
+                entry = self._rows[row]
+                if entry.get('row_type') == 'part':
+                    part = entry.get('part') or {}
+                    part_id = part.get('id')
+                    if isinstance(part_id, int):
+                        ids.append(part_id)
+        return ids
+
     def _rebuild_rows(self):
         filtered: list[dict] = []
         for part in self._raw_parts:
@@ -453,4 +512,13 @@ class TableModel(QAbstractTableModel):
         if self._category_id == WarehouseTab.UNCATEGORIZED:
             return part_category in (None, "", 0)
         return part_category == self._category_id
+
+    def _get_analog_color(self, group_id: int) -> QColor:
+        color = self._analog_color_cache.get(group_id)
+        if color is None:
+            hue = (abs(group_id * 47) % 360)
+            base_color = QColor.fromHsv(hue, 80, 255)
+            color = base_color.lighter(160)
+            self._analog_color_cache[group_id] = color
+        return color
 
