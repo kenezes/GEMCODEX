@@ -1687,7 +1687,7 @@ class Database:
                     return False, "Аналог уже привязан к данному оборудованию.", {}
 
                 cursor.execute(
-                    "UPDATE equipment_parts SET part_id = ? WHERE id = ?",
+                    "UPDATE equipment_parts SET part_id = ?, requires_replacement = 0 WHERE id = ?",
                     (new_part_id, equipment_part_id),
                 )
 
