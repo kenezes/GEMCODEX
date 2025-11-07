@@ -1,0 +1,21 @@
+{
+  "dashboard": {
+    "title": "Dashboard",
+    "status": "System status",
+    "status_placeholder": "Connect to see live data"
+  },
+  "parts": {
+    "title": "Warehouse",
+    "search_placeholder": "Search parts",
+    "qty": "Stock: {{qty}} (min {{min}})"
+  },
+  "tasks": {
+    "title": "Tasks",
+    "placeholder": "No active tasks",
+    "placeholder_hint": "Create a task on desktop to see it here"
+  },
+  "actions": {
+    "refresh": "Refresh"
+  },
+  "loading": "Loading..."
+}

@@ -1,3 +1,4 @@
+import os
 import sys
 import logging
 from datetime import datetime, timedelta
@@ -141,9 +142,16 @@ def main():
 
     db_path = Path('./data/app.db')
     backup_dir = Path('./backup')
+    api_base_url = os.getenv('API_BASE_URL')
+    api_token = os.getenv('API_TOKEN')
 
     try:
-        db = Database(db_path=str(db_path), backup_dir=str(backup_dir))
+        db = Database(
+            db_path=str(db_path),
+            backup_dir=str(backup_dir),
+            api_base_url=api_base_url,
+            api_token=api_token,
+        )
         db.connect()
     except Exception as e:
         logging.critical(f"Критическая ошибка при инициализации базы данных: {e}", exc_info=True)
