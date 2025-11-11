@@ -1,6 +1,4 @@
 **/logs
-!logs/
-!logs/migration_report.md
 *.log
 **/data
 **/__pycache__

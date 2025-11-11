@@ -1,84 +1,18 @@
-import os
 import sqlite3
 import logging
 from pathlib import Path
 from typing import Any, Optional
-import httpx
 from datetime import date, datetime, timedelta
 from collections import defaultdict
 
-
-class RemoteCursor:
-    def __init__(self, connection: "RemoteConnection"):
-        self.connection = connection
-        self._rows: list[dict[str, Any]] = []
-        self.rowcount: int = 0
-        self.lastrowid: int | None = None
-
-    def execute(self, query: str, params: tuple | dict | list | None = None):
-        payload: dict[str, Any] = {"query": query, "params": params}
-        response = self.connection.client.post("/sql", json=payload)
-        response.raise_for_status()
-        data = response.json()
-        self._rows = data.get("rows") or []
-        self.rowcount = data.get("rowcount") or 0
-        self.lastrowid = data.get("lastrowid")
-        return self
-
-    def fetchall(self):
-        return self._rows
-
-    def fetchone(self):
-        return self._rows[0] if self._rows else None
-
-
-class RemoteConnection:
-    def __init__(self, base_url: str, token: str | None = None, timeout: float = 10.0):
-        headers = {"Accept": "application/json"}
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        self.client = httpx.Client(base_url=base_url, headers=headers, timeout=timeout)
-
-    def cursor(self) -> RemoteCursor:
-        return RemoteCursor(self)
-
-    def execute(self, query: str, params: tuple | dict | list | None = None):
-        return self.cursor().execute(query, params)
-
-    def commit(self):
-        return None
-
-    def rollback(self):
-        return None
-
-    def close(self):
-        self.client.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        return False
-
-
 class Database:
-    """Класс для управления базой данных."""
-    def __init__(
-        self,
-        db_path: str,
-        backup_dir: str,
-        api_base_url: str | None = None,
-        api_token: str | None = None,
-    ):
+    """Класс для управления базой данных SQLite."""
+    def __init__(self, db_path: str, backup_dir: str):
         self.db_path = Path(db_path)
         self.backup_dir = Path(backup_dir)
-        self.api_base_url = api_base_url or os.getenv("API_BASE_URL")
-        self.api_token = api_token or os.getenv("API_TOKEN")
-        self._remote_enabled = bool(self.api_base_url)
-        self.conn: RemoteConnection | sqlite3.Connection | None = None
-        if not self._remote_enabled:
-            self.db_path.parent.mkdir(exist_ok=True)
-            self.backup_dir.mkdir(exist_ok=True)
+        self.conn = None
+        self.db_path.parent.mkdir(exist_ok=True)
+        self.backup_dir.mkdir(exist_ok=True)
         self._knives_category_id = None
         self._sharpening_category_ids: set[int] = set()
 
@@ -166,17 +100,7 @@ class Database:
         return result
 
     def connect(self):
-        """Устанавливает соединение с БД или удалённым API."""
-        if self._remote_enabled:
-            base_url = self.api_base_url.rstrip("/")
-            if not base_url.endswith("/legacy") and not base_url.endswith("/legacy/"):
-                api_url = f"{base_url}/legacy"
-            else:
-                api_url = base_url
-            logging.info("Connecting to remote API backend: %s", api_url)
-            self.conn = RemoteConnection(api_url, token=self.api_token)
-            self._refresh_sharpening_categories()
-            return
+        """Устанавливает соединение с БД и настраивает PRAGMA."""
         try:
             self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
             self.conn.row_factory = sqlite3.Row
@@ -195,10 +119,7 @@ class Database:
     def disconnect(self):
         """Закрывает соединение с БД."""
         if self.conn:
-            try:
-                self.conn.close()
-            except AttributeError:
-                pass
+            self.conn.close()
             self.conn = None
             logging.info("Database connection closed.")
 
@@ -239,37 +160,31 @@ class Database:
             return "установлен"
         return "снят"
 
-    def execute(self, query: str, params: tuple | dict | list = ()) -> Optional[Any]:
+    def execute(self, query: str, params: tuple = ()) -> Optional[sqlite3.Cursor]:
         """Выполняет один SQL-запрос."""
         try:
             if not self.conn:
                 raise sqlite3.Error("Database is not connected.")
             cursor = self.conn.cursor()
-            return cursor.execute(query, params)
-        except (sqlite3.Error, httpx.HTTPError) as e:
+            cursor.execute(query, params)
+            return cursor
+        except sqlite3.Error as e:
             logging.error(f"SQL Error: {e}\nQuery: {query}\nParams: {params}", exc_info=True)
             return None
 
-    def fetchall(self, query: str, params: tuple | dict | list = ()) -> list[dict[str, Any]]:
+    def fetchall(self, query: str, params: tuple = ()) -> list[dict[str, Any]]:
         """Выполняет запрос и возвращает все строки как список словарей."""
         cursor = self.execute(query, params)
         if cursor:
-            rows = cursor.fetchall()
-            if self._remote_enabled:
-                return [dict(row) for row in rows]
-            return [dict(row) for row in rows]
+            return [dict(row) for row in cursor.fetchall()]
         return []
 
-    def fetchone(self, query: str, params: tuple | dict | list = ()) -> Optional[dict[str, Any]]:
+    def fetchone(self, query: str, params: tuple = ()) -> Optional[dict[str, Any]]:
         """Выполняет запрос и возвращает одну строку как словарь."""
         cursor = self.execute(query, params)
         if cursor:
             row = cursor.fetchone()
-            if not row:
-                return None
-            if self._remote_enabled:
-                return dict(row)
-            return dict(row)
+            return dict(row) if row else None
         return None
 
     def get_setting(self, key: str, default: str = "") -> str:
@@ -928,10 +843,7 @@ class Database:
         )
 
     def backup_database(self) -> tuple[bool, str]:
-        if not self.conn:
-            return False, "Нет подключения к базе данных."
-        if self._remote_enabled:
-            return False, "Резервное копирование недоступно в удалённом режиме."
+        if not self.conn: return False, "Нет подключения к базе данных."
         import time
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         backup_path = self.backup_dir / f"app_{timestamp}.db"
