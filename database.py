@@ -941,7 +941,11 @@ class Database:
         query = """
             SELECT p.id, p.name, p.sku, p.qty, p.min_qty, p.price, p.category_id,
                    pc.name as category_name,
-                   (SELECT GROUP_CONCAT(eq.name, ', ') FROM equipment_parts ep
+                   (SELECT GROUP_CONCAT(CASE
+                        WHEN eq.sku IS NOT NULL AND eq.sku != '' THEN eq.sku
+                        ELSE 'б/а'
+                    END, ', ')
+                    FROM equipment_parts ep
                     JOIN equipment eq ON ep.equipment_id = eq.id WHERE ep.part_id = p.id) as equipment_list,
                    p.analog_group_id,
                    (
@@ -977,7 +981,7 @@ class Database:
                 FROM equipment_parts ep
                 JOIN equipment e ON ep.equipment_id = e.id
                 WHERE ep.part_id = ?
-                ORDER BY e.name
+                ORDER BY e.sku, e.name
             """,
             (part_id,),
         )
@@ -985,11 +989,9 @@ class Database:
         formatted: list[str] = []
         for row in rows:
             # sqlite3.Row поддерживает доступ как по индексу, так и по ключу.
-            name = row["name"] if row else None
             sku = row["sku"] if row else None
-            if not name:
-                continue
-            formatted.append(f"{name} ({sku})" if sku else name)
+            display_value = sku if sku else "б/а"
+            formatted.append(display_value)
 
         return ", ".join(formatted)
 
@@ -2973,7 +2975,13 @@ class Database:
                 COALESCE(kt.sharp_state, CASE kt.status WHEN 'затуплен' THEN 'затуплен' ELSE 'заточен' END) AS sharp_state,
                 COALESCE(kt.installation_state, CASE kt.status WHEN 'в работе' THEN 'установлен' ELSE 'снят' END) AS installation_state,
                 (
-                    SELECT GROUP_CONCAT(eq.name, ', ')
+                    SELECT GROUP_CONCAT(
+                        CASE
+                            WHEN eq.sku IS NOT NULL AND eq.sku != '' THEN eq.sku
+                            ELSE 'б/а'
+                        END,
+                        ', '
+                    )
                     FROM equipment_parts ep
                     JOIN equipment eq ON ep.equipment_id = eq.id
                     WHERE ep.part_id = p.id
@@ -2985,6 +2993,42 @@ class Database:
             ORDER BY p.name
         """
         return self.fetchall(query)
+
+    def get_equipment_links_for_parts(self, part_ids: list[int]) -> dict[int, list[dict]]:
+        if not part_ids:
+            return {}
+
+        placeholders = ",".join(["?"] * len(part_ids))
+        query = f"""
+            SELECT
+                ep.part_id,
+                ep.equipment_id,
+                e.name AS equipment_name,
+                e.sku AS equipment_sku,
+                ep.installed_qty,
+                COALESCE(
+                    ep.last_replacement_override,
+                    (
+                        SELECT MAX(r.date)
+                        FROM replacements r
+                        WHERE r.part_id = ep.part_id AND r.equipment_id = ep.equipment_id
+                    )
+                ) AS last_replacement_date,
+                ep.comment AS equipment_comment
+            FROM equipment_parts ep
+            JOIN equipment e ON ep.equipment_id = e.id
+            WHERE ep.part_id IN ({placeholders})
+            ORDER BY e.name
+        """
+
+        rows = self.fetchall(query, tuple(part_ids))
+        result: dict[int, list[dict]] = {}
+        for row in rows:
+            part_id = row.get('part_id')
+            if part_id is None:
+                continue
+            result.setdefault(part_id, []).append(row)
+        return result
 
     def get_all_knives_data(self):
         return self.get_all_sharpening_items()
