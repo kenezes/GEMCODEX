@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -82,9 +83,9 @@ class LogTab(QWidget):
         self.log_view.setFont(font)
         layout.addWidget(self.log_view)
 
-        path_label = QLabel(f"Текущий файл: {self.log_file.resolve()}")
-        path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(path_label)
+        self.path_label = QLabel(f"Текущий файл: {self.log_file.resolve()}")
+        self.path_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.path_label)
 
     def _toggle_auto_refresh(self, enabled: bool) -> None:
         if enabled:
@@ -102,6 +103,7 @@ class LogTab(QWidget):
     def load_log(self) -> None:
         if not self.log_file.exists():
             self.log_view.setPlainText("Лог-файл пока не создан.")
+            self.path_label.setText(f"Текущий файл: {self.log_file.resolve()} (ещё не создан)")
             return
 
         try:
@@ -109,6 +111,12 @@ class LogTab(QWidget):
         except OSError as exc:
             QMessageBox.warning(self, "Ошибка", f"Не удалось прочитать лог-файл:\n{exc}")
             return
+
+        modified = datetime.fromtimestamp(self.log_file.stat().st_mtime)
+        modified_text = modified.strftime("%d.%m.%Y %H:%M:%S")
+        self.path_label.setText(
+            f"Текущий файл: {self.log_file.resolve()} (обновлён {modified_text})"
+        )
 
         lines = content.splitlines()
         max_lines = 1000
