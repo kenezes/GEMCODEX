@@ -214,12 +214,11 @@ class EquipmentTab(QWidget):
                 index = self.tree.indexOfTopLevelItem(cat_item)
                 self.tree.takeTopLevelItem(index)
 
-        self._set_default_tree_state()
+        self.tree.expandAll()
 
         if selected_equipment_id:
             item = self._find_tree_item_by_equipment_id(selected_equipment_id)
             if item:
-                self._expand_parents(item)
                 self.tree.setCurrentItem(item)
                 self.current_equipment_id = selected_equipment_id
                 self.update_comment_panel(item)
@@ -232,20 +231,6 @@ class EquipmentTab(QWidget):
             self.parts_table.setRowCount(0)
 
         self.update_buttons_state()
-
-    def _set_default_tree_state(self):
-        for index in range(self.tree.topLevelItemCount()):
-            category_item = self.tree.topLevelItem(index)
-            category_item.setExpanded(True)
-            self._collapse_equipment_descendants(category_item)
-
-    def _collapse_equipment_descendants(self, item: QTreeWidgetItem):
-        for child_index in range(item.childCount()):
-            child = item.child(child_index)
-            child_data = child.data(0, Qt.UserRole) or {}
-            if child_data.get('type') == 'equipment' and child.childCount():
-                child.setExpanded(False)
-            self._collapse_equipment_descendants(child)
 
     def _add_equipment_node(
         self,
@@ -307,12 +292,6 @@ class EquipmentTab(QWidget):
             stack.extend(_iter_items(item))
 
         return None
-
-    def _expand_parents(self, item: QTreeWidgetItem):
-        current = item.parent()
-        while current:
-            current.setExpanded(True)
-            current = current.parent()
 
     def on_tree_selection_changed(self, current, previous):
         self.update_buttons_state()

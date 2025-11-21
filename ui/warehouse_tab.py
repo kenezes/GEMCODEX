@@ -160,7 +160,6 @@ class WarehouseTab(QWidget):
         self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self.show_context_menu)
         self.table_view.doubleClicked.connect(self.edit_part_from_table)
-        self.table_view.clicked.connect(self._on_table_clicked)
         
         # Автоширина колонок
         header = self.table_view.horizontalHeader()
@@ -210,11 +209,6 @@ class WarehouseTab(QWidget):
         logging.info("Refreshing warehouse data...")
         self.load_categories()
         parts_data = self.db.get_all_parts()
-        part_ids = [part.get('id') for part in parts_data if part.get('id')]
-        equipment_links = self.db.get_equipment_links_for_parts(part_ids)
-        for part in parts_data:
-            part_id = part.get('id')
-            part['equipment_links'] = equipment_links.get(part_id, [])
         self.table_model.set_parts(parts_data)
         self.filter_data() # Применяем фильтры после обновления
         logging.info("Warehouse data refreshed.")
@@ -244,20 +238,6 @@ class WarehouseTab(QWidget):
             dialog = PartDialog(self.db, self.event_bus, part_id=part_id, parent=self)
             if dialog.exec():
                 self.refresh_data()
-
-    def _on_table_clicked(self, index: QModelIndex):
-        if not index.isValid():
-            return
-
-        row_type = self.table_model.get_row_type(index.row())
-        if row_type != 'part':
-            return
-
-        part_id = self.table_model.get_id_from_index(index)
-        part = self.table_model.get_row(index.row()) or {}
-
-        if index.column() == 0 and part.get('equipment_links') and isinstance(part_id, int):
-            self.table_model.toggle_part_expansion(part_id)
 
     def delete_part(self, part_id):
         part = self.db.get_part_by_id(part_id)
@@ -358,7 +338,6 @@ class TableModel(QAbstractTableModel):
         self._category_id: Any = WarehouseTab.ALL_CATEGORIES
         self._category_lookup: dict[Any, str] = {}
         self._analog_color_cache: dict[int, QColor] = {}
-        self._expanded_parts: set[int] = set()
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._rows)
@@ -390,40 +369,13 @@ class TableModel(QAbstractTableModel):
                 return Qt.AlignLeft | Qt.AlignVCenter
             return None
 
-        if row_type == 'equipment':
-            equipment = row_entry.get('equipment', {})
-            if role == Qt.DisplayRole:
-                if column == 0:
-                    return f"↳ {equipment.get('equipment_name', '')}"
-                if column == 1:
-                    return equipment.get('equipment_sku') or 'б/а'
-                if column == 2:
-                    return equipment.get('installed_qty')
-                if column == 3:
-                    return equipment.get('last_replacement_date') or ''
-                if column == 4:
-                    return equipment.get('equipment_comment') or ''
-                return ""
-            if role == Qt.TextAlignmentRole:
-                if column == 2:
-                    return Qt.AlignCenter
-                if column == self.FOLDER_COLUMN:
-                    return Qt.AlignCenter
-            if role == Qt.BackgroundRole:
-                return QColor('#fafafa')
-            return None
-
         part = row_entry.get('part', {})
         analog_group_id = part.get('analog_group_id')
         analog_group_size = part.get('analog_group_size') or 0
 
         if role == Qt.DisplayRole:
             if column == 0:
-                prefix = ""
-                part_id = part.get('id')
-                if part.get('equipment_links'):
-                    prefix = "▼ " if isinstance(part_id, int) and part_id in self._expanded_parts else "▶ "
-                return f"{prefix}{part.get('name')}"
+                return part.get('name')
             if column == 1:
                 return part.get('sku')
             if column == 2:
@@ -477,8 +429,6 @@ class TableModel(QAbstractTableModel):
 
     def set_parts(self, parts: list[dict]):
         self._raw_parts = parts or []
-        current_ids = {part.get('id') for part in self._raw_parts if isinstance(part.get('id'), int)}
-        self._expanded_parts.intersection_update(current_ids)
         self._rebuild_rows()
 
     def set_category_lookup(self, lookup: dict[Any, str]):
@@ -523,13 +473,6 @@ class TableModel(QAbstractTableModel):
                         ids.append(part_id)
         return ids
 
-    def toggle_part_expansion(self, part_id: int):
-        if part_id in self._expanded_parts:
-            self._expanded_parts.remove(part_id)
-        else:
-            self._expanded_parts.add(part_id)
-        self._rebuild_rows()
-
     def _rebuild_rows(self):
         filtered: list[dict] = []
         for part in self._raw_parts:
@@ -557,14 +500,6 @@ class TableModel(QAbstractTableModel):
                 rows.append({'row_type': 'category', 'category_name': label})
                 current_category = category_name
             rows.append({'row_type': 'part', 'part': part})
-            part_id = part.get('id')
-            if isinstance(part_id, int) and part_id in self._expanded_parts:
-                for equipment in part.get('equipment_links') or []:
-                    rows.append({
-                        'row_type': 'equipment',
-                        'equipment': equipment,
-                        'parent_part_id': part_id,
-                    })
 
         self.beginResetModel()
         self._rows = rows
