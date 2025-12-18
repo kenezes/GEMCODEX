@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QModelIndex
 
-from ui.utils import db_string_to_ui_string, apply_table_compact_style
+from .utils import db_string_to_ui_string, apply_table_compact_style
 from .knife_sharpen_history_dialog import KnifeSharpenHistoryDialog
 
 

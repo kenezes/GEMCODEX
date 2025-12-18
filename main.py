@@ -26,14 +26,14 @@ from ui.sharpening_tab import SharpeningTab
 from ui.log_tab import LogTab
 from backup_utils import create_application_backup, get_latest_backup_time
 
-def setup_logging_and_paths():
+def setup_logging_and_paths(app_root: Path):
     """Настраивает логирование и создает необходимые каталоги.
 
     Returns:
         Path: Путь к основному файлу журнала приложения.
     """
-    log_dir = Path("./logs")
-    log_dir.mkdir(exist_ok=True)
+    log_dir = app_root / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "app.log"
     logging.basicConfig(
         level=logging.INFO,
@@ -45,8 +45,8 @@ def setup_logging_and_paths():
             )
         ]
     )
-    Path("./data").mkdir(exist_ok=True)
-    Path("./backup").mkdir(exist_ok=True)
+    (app_root / "data").mkdir(parents=True, exist_ok=True)
+    (app_root / "backup").mkdir(parents=True, exist_ok=True)
     return log_file
 
 class MainWindow(QMainWindow):
@@ -136,11 +136,12 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
 
-    log_file = setup_logging_and_paths()
+    app_root = Path(__file__).resolve().parent
+    log_file = setup_logging_and_paths(app_root)
     logging.info("Application starting...")
 
-    db_path = Path('./data/app.db')
-    backup_dir = Path('./backup')
+    db_path = app_root / "data" / "app.db"
+    backup_dir = app_root / "backup"
 
     try:
         db = Database(db_path=str(db_path), backup_dir=str(backup_dir))
@@ -152,7 +153,7 @@ def main():
     
     event_bus = EventBus()
 
-    window = MainWindow(db, event_bus, log_file, Path.cwd())
+    window = MainWindow(db, event_bus, log_file, app_root)
     window.show()
 
     sys.exit(app.exec())

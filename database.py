@@ -11,8 +11,8 @@ class Database:
         self.db_path = Path(db_path)
         self.backup_dir = Path(backup_dir)
         self.conn = None
-        self.db_path.parent.mkdir(exist_ok=True)
-        self.backup_dir.mkdir(exist_ok=True)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
         self._knives_category_id = None
         self._sharpening_category_ids: set[int] = set()
 
@@ -160,28 +160,37 @@ class Database:
             return "установлен"
         return "снят"
 
-    def execute(self, query: str, params: tuple = ()) -> Optional[sqlite3.Cursor]:
-        """Выполняет один SQL-запрос."""
+    def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
+        """Выполняет один SQL-запрос и пробрасывает ошибки."""
+        if not self.conn:
+            raise RuntimeError("Database is not connected.")
+
         try:
-            if not self.conn:
-                raise sqlite3.Error("Database is not connected.")
             cursor = self.conn.cursor()
             cursor.execute(query, params)
             return cursor
         except sqlite3.Error as e:
             logging.error(f"SQL Error: {e}\nQuery: {query}\nParams: {params}", exc_info=True)
+            raise
+
+    def execute_safe(self, query: str, params: tuple = ()) -> Optional[sqlite3.Cursor]:
+        """Выполняет запрос и возвращает None при ошибке."""
+        try:
+            return self.execute(query, params)
+        except sqlite3.Error as e:
+            logging.error(f"SQL Error (safe): {e}\nQuery: {query}\nParams: {params}", exc_info=True)
             return None
 
     def fetchall(self, query: str, params: tuple = ()) -> list[dict[str, Any]]:
         """Выполняет запрос и возвращает все строки как список словарей."""
-        cursor = self.execute(query, params)
+        cursor = self.execute_safe(query, params)
         if cursor:
             return [dict(row) for row in cursor.fetchall()]
         return []
 
     def fetchone(self, query: str, params: tuple = ()) -> Optional[dict[str, Any]]:
         """Выполняет запрос и возвращает одну строку как словарь."""
-        cursor = self.execute(query, params)
+        cursor = self.execute_safe(query, params)
         if cursor:
             row = cursor.fetchone()
             return dict(row) if row else None
@@ -1118,32 +1127,50 @@ class Database:
 
     def get_part_categories(self): return self.fetchall("SELECT id, name FROM part_categories ORDER BY name")
     def add_part_category(self, name):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
         try:
-            self.execute("INSERT INTO part_categories (name) VALUES (?)", (name,))
-            if self.conn: self.conn.commit()
+            with self.conn:
+                self.conn.execute("INSERT INTO part_categories (name) VALUES (?)", (name,))
             self._log_action(f"Добавлена категория запчастей: {name}")
             return True, "Категория добавлена."
-        except sqlite3.IntegrityError: return False, "Категория с таким именем уже существует."
+        except sqlite3.IntegrityError:
+            return False, "Категория с таким именем уже существует."
+        except sqlite3.Error as exc:
+            logging.error("Ошибка добавления категории запчастей %s: %s", name, exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}"
     def update_part_category(self, category_id, name):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
         try:
-            self.execute("UPDATE part_categories SET name = ? WHERE id = ?", (name, category_id))
-            if self.conn: self.conn.commit()
+            with self.conn:
+                self.conn.execute("UPDATE part_categories SET name = ? WHERE id = ?", (name, category_id))
             self._log_action(f"Обновлена категория запчастей #{category_id}: {name}")
             return True, "Категория переименована."
-        except sqlite3.IntegrityError: return False, "Категория с таким именем уже существует."
+        except sqlite3.IntegrityError:
+            return False, "Категория с таким именем уже существует."
+        except sqlite3.Error as exc:
+            logging.error("Ошибка обновления категории запчастей #%s: %s", category_id, exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}"
     def delete_part_category(self, category_id):
         if category_id == self._knives_category_id:
             return False, "Системную категорию 'ножи' нельзя удалить."
         try:
             category = self.fetchone("SELECT name FROM part_categories WHERE id = ?", (category_id,))
-            self.execute("DELETE FROM part_categories WHERE id = ?", (category_id,))
-            if self.conn: self.conn.commit()
+            if not self.conn:
+                return False, "Нет подключения к БД."
+            with self.conn:
+                self.conn.execute("DELETE FROM part_categories WHERE id = ?", (category_id,))
             if category:
                 self._log_action(f"Удалена категория запчастей #{category_id}: {category['name']}")
             else:
                 self._log_action(f"Удалена категория запчастей #{category_id}")
             return True, "Категория удалена."
-        except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+        except sqlite3.Error as e:
+            logging.error("Ошибка удаления категории запчастей #%s: %s", category_id, e, exc_info=True)
+            return False, f"Ошибка базы данных: {e}"
 
     # --- Counterparties, Orders, Equipment etc. (existing methods) ---
     def get_all_counterparties(self):
@@ -1248,8 +1275,10 @@ class Database:
         if self.fetchone("SELECT 1 FROM orders WHERE counterparty_id = ?", (c_id,)): return False, "Удаление невозможно: у контрагента есть заказы."
         try:
             counterparty = self.fetchone("SELECT name FROM counterparties WHERE id = ?", (c_id,))
-            self.execute("DELETE FROM counterparties WHERE id = ?", (c_id,))
-            if self.conn: self.conn.commit()
+            if not self.conn:
+                return False, "Нет подключения к БД."
+            with self.conn:
+                self.conn.execute("DELETE FROM counterparties WHERE id = ?", (c_id,))
             if counterparty:
                 self._log_action(f"Удалён контрагент #{c_id}: {counterparty['name']}")
             else:
@@ -1471,55 +1500,82 @@ class Database:
             return False, f"Ошибка транзакции: {e}"
     def get_equipment_categories(self): return self.fetchall("SELECT id, name FROM equipment_categories ORDER BY name")
     def add_equipment_category(self, name):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
         try:
-            self.execute("INSERT INTO equipment_categories (name) VALUES (?)", (name,))
-            if self.conn: self.conn.commit()
+            with self.conn:
+                self.conn.execute("INSERT INTO equipment_categories (name) VALUES (?)", (name,))
             self._log_action(f"Добавлена категория оборудования: {name}")
             return True, "Категория добавлена."
-        except sqlite3.IntegrityError: return False, "Категория с таким именем уже существует."
+        except sqlite3.IntegrityError:
+            return False, "Категория с таким именем уже существует."
+        except sqlite3.Error as exc:
+            logging.error("Ошибка добавления категории оборудования %s: %s", name, exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}"
     def update_equipment_category(self, cat_id, name):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
         try:
-            self.execute("UPDATE equipment_categories SET name = ? WHERE id = ?", (name, cat_id))
-            if self.conn: self.conn.commit()
+            with self.conn:
+                self.conn.execute("UPDATE equipment_categories SET name = ? WHERE id = ?", (name, cat_id))
             self._log_action(f"Обновлена категория оборудования #{cat_id}: {name}")
             return True, "Категория обновлена."
-        except sqlite3.IntegrityError: return False, "Категория с таким именем уже существует."
+        except sqlite3.IntegrityError:
+            return False, "Категория с таким именем уже существует."
+        except sqlite3.Error as exc:
+            logging.error("Ошибка обновления категории оборудования #%s: %s", cat_id, exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}"
     def delete_equipment_category(self, cat_id):
         if self.fetchone("SELECT 1 FROM equipment WHERE category_id = ?", (cat_id,)): return False, "Удаление невозможно: в категории есть оборудование."
         try:
             category = self.fetchone("SELECT name FROM equipment_categories WHERE id = ?", (cat_id,))
-            self.execute("DELETE FROM equipment_categories WHERE id = ?", (cat_id,))
-            if self.conn: self.conn.commit()
+            if not self.conn:
+                return False, "Нет подключения к БД."
+            with self.conn:
+                self.conn.execute("DELETE FROM equipment_categories WHERE id = ?", (cat_id,))
             if category:
                 self._log_action(f"Удалена категория оборудования #{cat_id}: {category['name']}")
             else:
                 self._log_action(f"Удалена категория оборудования #{cat_id}")
             return True, "Категория удалена."
-        except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+        except sqlite3.Error as e:
+            logging.error("Ошибка удаления категории оборудования #%s: %s", cat_id, e, exc_info=True)
+            return False, f"Ошибка базы данных: {e}"
     def get_all_equipment(self):
         return self.fetchall("SELECT id, name, sku, category_id, parent_id, comment FROM equipment ORDER BY name")
 
     def add_equipment(self, name, sku, category_id, parent_id=None, comment=None):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
         try:
-            self.execute(
-                "INSERT INTO equipment (name, sku, category_id, parent_id, comment) VALUES (?, ?, ?, ?, ?)",
-                (name, sku, category_id, parent_id, comment),
-            )
-            if self.conn: self.conn.commit()
+            with self.conn:
+                self.conn.execute(
+                    "INSERT INTO equipment (name, sku, category_id, parent_id, comment) VALUES (?, ?, ?, ?, ?)",
+                    (name, sku, category_id, parent_id, comment),
+                )
             self._log_action(f"Добавлено оборудование: {name} (артикул: {sku or 'нет'}, категория #{category_id})")
             return True, "Оборудование добавлено."
-        except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+        except sqlite3.Error as e:
+            logging.error("Ошибка добавления оборудования %s: %s", name, e, exc_info=True)
+            return False, f"Ошибка базы данных: {e}"
     def update_equipment(self, eq_id, name, sku, category_id, parent_id=None, comment=None):
         try:
             if eq_id and eq_id == parent_id: return False, "Оборудование не может быть родителем для самого себя."
-            self.execute(
-                "UPDATE equipment SET name=?, sku=?, category_id=?, parent_id=?, comment=? WHERE id=?",
-                (name, sku, category_id, parent_id, comment, eq_id),
-            )
-            if self.conn: self.conn.commit()
+            if not self.conn:
+                return False, "Нет подключения к БД."
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE equipment SET name=?, sku=?, category_id=?, parent_id=?, comment=? WHERE id=?",
+                    (name, sku, category_id, parent_id, comment, eq_id),
+                )
             self._log_action(f"Обновлено оборудование #{eq_id}: {name} (артикул: {sku or 'нет'})")
             return True, "Данные оборудования обновлены."
-        except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+        except sqlite3.Error as e:
+            logging.error("Ошибка обновления оборудования #%s: %s", eq_id, e, exc_info=True)
+            return False, f"Ошибка базы данных: {e}"
 
     def copy_equipment_with_parts(self, equipment_id: int, copies: int = 1):
         if not self.conn:
@@ -1599,9 +1655,8 @@ class Database:
             return False, "Нет подключения к БД."
 
         try:
-            self.execute("UPDATE equipment SET comment = ? WHERE id = ?", (comment, eq_id))
-            if self.conn:
-                self.conn.commit()
+            with self.conn:
+                self.conn.execute("UPDATE equipment SET comment = ? WHERE id = ?", (comment, eq_id))
             self._log_action(f"Обновлён комментарий оборудования #{eq_id}")
             return True, "Комментарий обновлен."
         except sqlite3.Error as e:
@@ -2477,30 +2532,48 @@ class Database:
         except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
     def get_all_colleagues(self): return self.fetchall("SELECT id, name FROM colleagues ORDER BY name")
     def add_colleague(self, name):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
         try:
-            self.execute("INSERT INTO colleagues (name) VALUES (?)", (name,))
-            if self.conn: self.conn.commit()
+            with self.conn:
+                self.conn.execute("INSERT INTO colleagues (name) VALUES (?)", (name,))
             self._log_action(f"Добавлен сотрудник: {name}")
             return True, "Сотрудник добавлен."
-        except sqlite3.IntegrityError: return False, "Сотрудник с таким именем уже существует."
+        except sqlite3.IntegrityError:
+            return False, "Сотрудник с таким именем уже существует."
+        except sqlite3.Error as exc:
+            logging.error("Ошибка добавления сотрудника %s: %s", name, exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}"
     def update_colleague(self, colleague_id, name):
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
         try:
-            self.execute("UPDATE colleagues SET name = ? WHERE id = ?", (name, colleague_id))
-            if self.conn: self.conn.commit()
+            with self.conn:
+                self.conn.execute("UPDATE colleagues SET name = ? WHERE id = ?", (name, colleague_id))
             self._log_action(f"Обновлён сотрудник #{colleague_id}: {name}")
             return True, "Имя сотрудника обновлено."
-        except sqlite3.IntegrityError: return False, "Сотрудник с таким именем уже существует."
+        except sqlite3.IntegrityError:
+            return False, "Сотрудник с таким именем уже существует."
+        except sqlite3.Error as exc:
+            logging.error("Ошибка обновления сотрудника #%s: %s", colleague_id, exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}"
     def delete_colleague(self, colleague_id):
         try:
             colleague = self.fetchone("SELECT name FROM colleagues WHERE id = ?", (colleague_id,))
-            self.execute("DELETE FROM colleagues WHERE id = ?", (colleague_id,))
-            if self.conn: self.conn.commit()
+            if not self.conn:
+                return False, "Нет подключения к БД."
+            with self.conn:
+                self.conn.execute("DELETE FROM colleagues WHERE id = ?", (colleague_id,))
             if colleague:
                 self._log_action(f"Удалён сотрудник #{colleague_id}: {colleague['name']}")
             else:
                 self._log_action(f"Удалён сотрудник #{colleague_id}")
             return True, "Сотрудник удален."
-        except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+        except sqlite3.Error as e:
+            logging.error("Ошибка удаления сотрудника #%s: %s", colleague_id, e, exc_info=True)
+            return False, f"Ошибка базы данных: {e}"
     def get_all_tasks(self):
         query = """
             SELECT t.id, t.title, t.description, t.priority, t.due_date, t.status,

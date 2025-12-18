@@ -366,8 +366,7 @@ class OrderDialog(QDialog):
             self.items_table_model.remove_item(selected_rows[0].row())
 
     def accept(self):
-        if self.validate_input():
-            self.save_data()
+        if self.validate_input() and self.save_data():
             super().accept()
 
     def validate_input(self):
@@ -379,7 +378,7 @@ class OrderDialog(QDialog):
             QMessageBox.warning(self, "Ошибка валидации", "Заказ должен содержать хотя бы одну позицию."); return False
         return True
 
-    def save_data(self):
+    def save_data(self) -> bool:
         order_data = {
             "counterparty_id": self.counterparty_combo.currentData(),
             "invoice_no": self.invoice_no_edit.text().strip(),
@@ -406,4 +405,5 @@ class OrderDialog(QDialog):
                 self.event_bus.emit("parts.changed") # Отправляем сигнал, т.к. цены могли измениться
         else:
             QMessageBox.critical(self, "Ошибка базы данных", message)
+        return success
 

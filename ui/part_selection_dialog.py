@@ -1,5 +1,5 @@
 import logging
-from ui.utils import apply_table_compact_style
+from .utils import apply_table_compact_style
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QLineEdit, QTableView, QHeaderView, 
     QDialogButtonBox
