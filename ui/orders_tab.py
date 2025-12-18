@@ -129,8 +129,14 @@ class OrdersFilterProxyModel(QSortFilterProxyModel):
 
         index = self.sourceModel().index(source_row, OrdersTableModel.STATUS_COLUMN, source_parent)
         status = self.sourceModel().data(index) or ""
-        normalized = str(status).strip().lower().replace('ё', 'е')
-        return not any(keyword in normalized for keyword in ("принят", "отменен", "отменена"))
+        normalized = " ".join(str(status).lower().replace('ё', 'е').split())
+        if normalized.startswith("принят"):
+            return False
+        if normalized.startswith("отмен"):
+            return False
+        if normalized in {"accepted", "cancelled", "canceled"}:
+            return False
+        return True
 
 class OrdersTab(QWidget):
     """Вкладка для управления заказами."""
