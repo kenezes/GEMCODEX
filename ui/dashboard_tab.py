@@ -21,9 +21,9 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QColor, QBrush, QAction, QDesktopServices, QGuiApplication
 from PySide6.QtCore import Qt, QUrl
 
-from ui.order_dialog import OrderDialog
-from ui.task_dialog import TaskDialog
-from ui.utils import build_driver_notification_message, db_string_to_ui_string
+from .order_dialog import OrderDialog
+from .task_dialog import TaskDialog
+from .utils import build_driver_notification_message, db_string_to_ui_string
 
 class DashboardTab(QWidget):
     def __init__(self, db, event_bus, main_window):

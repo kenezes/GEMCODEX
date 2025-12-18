@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, QSortFilterProxyModel, QAbstractTableModel, QMode
 from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
 
 from .order_dialog import OrderDialog
-from ui.utils import (
+from .utils import (
     apply_table_compact_style,
     build_driver_notification_message,
     db_string_to_ui_string,
