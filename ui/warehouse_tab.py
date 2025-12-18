@@ -568,10 +568,18 @@ class TableModel(QAbstractTableModel):
                     continue
             filtered.append(part)
 
-        filtered.sort(key=lambda item: (
-            (item.get('category_name') or '').lower(),
-            (item.get('name') or '').lower(),
-        ))
+        def _sort_key(item: dict):
+            category = (item.get('category_name') or '').lower()
+            analog_group_id = item.get('analog_group_id') or 0
+            analog_size = item.get('analog_group_size') or 0
+            analog_key = analog_group_id if analog_size and analog_size > 1 else item.get('id') or 0
+            return (
+                category,
+                analog_key,
+                (item.get('name') or '').lower(),
+            )
+
+        filtered.sort(key=_sort_key)
 
         rows: list[dict] = []
         current_category: Optional[str] = None

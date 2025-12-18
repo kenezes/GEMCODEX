@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                              QMessageBox, QSplitter, QTreeWidget, QTreeWidgetItem,
                              QTableWidget, QTableWidgetItem, QHeaderView, QToolButton,
                              QLabel, QPlainTextEdit, QStyle, QCheckBox, QMenu,
-                             QAbstractItemView, QLineEdit, QApplication)
+                             QAbstractItemView, QLineEdit, QApplication, QInputDialog)
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtCore import Qt, QSize, QEvent
 
@@ -63,12 +63,14 @@ class EquipmentTab(QWidget):
         self.add_equipment_button = _create_tool_button(QStyle.SP_FileDialogNewFolder, "Добавить оборудование")
         self.edit_equipment_button = _create_tool_button(QStyle.SP_FileDialogContentsView, "Редактировать выбранный элемент")
         self.delete_equipment_button = _create_tool_button(QStyle.SP_TrashIcon, "Удалить выбранный элемент")
+        self.copy_equipment_button = _create_tool_button(QStyle.SP_FileDialogInfoView, "Скопировать выбранное оборудование")
         self.open_equipment_folder_button = _create_tool_button(QStyle.SP_DirOpenIcon, "Открыть папку оборудования")
 
         tree_buttons_layout.addWidget(self.manage_categories_button)
         tree_buttons_layout.addWidget(self.add_equipment_button)
         tree_buttons_layout.addWidget(self.edit_equipment_button)
         tree_buttons_layout.addWidget(self.delete_equipment_button)
+        tree_buttons_layout.addWidget(self.copy_equipment_button)
         tree_buttons_layout.addWidget(self.open_equipment_folder_button)
         tree_buttons_layout.addStretch()
 
@@ -151,6 +153,7 @@ class EquipmentTab(QWidget):
         self.add_equipment_button.clicked.connect(self.add_equipment)
         self.edit_equipment_button.clicked.connect(self.edit_equipment)
         self.delete_equipment_button.clicked.connect(self.delete_equipment)
+        self.copy_equipment_button.clicked.connect(self.copy_equipment)
         self.tree.currentItemChanged.connect(self.on_tree_selection_changed)
         self.add_part_button.clicked.connect(self.attach_part)
         self.open_equipment_folder_button.clicked.connect(self.open_selected_equipment_folder)
@@ -170,6 +173,7 @@ class EquipmentTab(QWidget):
 
         self.edit_equipment_button.setEnabled(is_item_selected)
         self.delete_equipment_button.setEnabled(is_item_selected)
+        self.copy_equipment_button.setEnabled(is_equipment_selected)
         self.add_part_button.setEnabled(is_equipment_selected)
         self.open_equipment_folder_button.setEnabled(is_equipment_selected)
 
@@ -1218,6 +1222,44 @@ class EquipmentTab(QWidget):
                 success, message = self.db.delete_equipment(item_id)
                 QMessageBox.information(self, "Результат", message)
                 if success: self.load_tree_data()
+
+    def copy_equipment(self):
+        selected_item = self.tree.currentItem()
+        if not selected_item:
+            QMessageBox.information(self, "Копирование", "Выберите оборудование для копирования.")
+            return
+
+        item_data = selected_item.data(0, Qt.UserRole)
+        if item_data.get('type') != 'equipment':
+            QMessageBox.information(self, "Копирование", "Копировать можно только конкретное оборудование.")
+            return
+
+        equipment_id = item_data.get('id')
+        equipment_name = selected_item.text(0)
+
+        copies, ok = QInputDialog.getInt(
+            self,
+            "Копирование оборудования",
+            f"Сколько копий оборудования '{equipment_name}' создать?",
+            1,
+            1,
+            50,
+            1,
+        )
+        if not ok:
+            return
+
+        success, message, new_ids = self.db.copy_equipment_with_parts(equipment_id, copies)
+        if not success:
+            QMessageBox.warning(self, "Копирование", message)
+            return
+
+        info_suffix = "Создана копия." if copies == 1 else f"Создано копий: {copies}."
+        QMessageBox.information(self, "Копирование", f"{info_suffix}\n{message}")
+        self.event_bus.emit('equipment.changed')
+        for new_id in new_ids:
+            self.event_bus.emit('equipment_parts_changed', new_id)
+        self.load_tree_data()
 
     def attach_part(self):
         if self.current_equipment_id:

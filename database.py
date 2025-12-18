@@ -868,7 +868,7 @@ class Database:
 
     # --- Dashboard Queries ---
     def get_parts_to_order(self):
-        """Возвращает запчасти, у которых текущий остаток меньше минимального."""
+        """Возвращает запчасти, учитывая группы аналогов при расчёте минимального остатка."""
         query = """
             SELECT
                 p.id,
@@ -877,6 +877,12 @@ class Database:
                 p.qty,
                 p.min_qty,
                 p.price,
+                p.analog_group_id,
+                (
+                    SELECT COUNT(*)
+                    FROM parts pa
+                    WHERE pa.analog_group_id = p.analog_group_id
+                ) as analog_group_size,
                 CASE
                     WHEN p.qty <= 0 AND EXISTS (
                         SELECT 1 FROM equipment_parts ep
@@ -885,17 +891,45 @@ class Database:
                     ELSE 0
                 END AS requires_replacement_flag
             FROM parts p
-            WHERE p.qty < p.min_qty
-               OR (
-                    p.qty <= 0
-                    AND EXISTS (
-                        SELECT 1 FROM equipment_parts ep
-                        WHERE ep.part_id = p.id AND ep.requires_replacement = 1
-                    )
-                )
             ORDER BY p.name
         """
-        return self.fetchall(query)
+
+        parts = self.fetchall(query) or []
+        analog_groups: dict[int, list[dict]] = {}
+        result: list[dict] = []
+
+        for part in parts:
+            group_id = part.get("analog_group_id")
+            group_size = part.get("analog_group_size") or 0
+            if group_id is not None and group_size > 1:
+                analog_groups.setdefault(int(group_id), []).append(part)
+            else:
+                if self._needs_restock(part):
+                    result.append(part)
+
+        for group_id, grouped_parts in analog_groups.items():
+            total_qty = sum(part.get("qty", 0) or 0 for part in grouped_parts)
+            total_min = sum(part.get("min_qty", 0) or 0 for part in grouped_parts)
+            requires_flag = any(part.get("requires_replacement_flag") for part in grouped_parts)
+
+            if total_qty < total_min or (total_qty <= 0 and requires_flag):
+                result.extend(grouped_parts)
+
+        return result
+
+    @staticmethod
+    def _needs_restock(part: dict[str, Any]) -> bool:
+        qty = part.get("qty", 0) or 0
+        min_qty = part.get("min_qty", 0) or 0
+        requires_replacement_flag = part.get("requires_replacement_flag")
+
+        if qty < min_qty:
+            return True
+
+        if qty <= 0 and requires_replacement_flag:
+            return True
+
+        return False
 
     def get_active_tasks(self):
         """Возвращает незавершенные задачи, отсортированные по приоритету и сроку."""
@@ -941,12 +975,14 @@ class Database:
         query = """
             SELECT p.id, p.name, p.sku, p.qty, p.min_qty, p.price, p.category_id,
                    pc.name as category_name,
-                   (SELECT GROUP_CONCAT(CASE
-                        WHEN eq.sku IS NOT NULL AND eq.sku != '' THEN eq.sku
-                        ELSE 'б/а'
-                    END, ', ')
-                    FROM equipment_parts ep
-                    JOIN equipment eq ON ep.equipment_id = eq.id WHERE ep.part_id = p.id) as equipment_list,
+                   (
+                        SELECT GROUP_CONCAT(
+                            eq.name || ' (' || COALESCE(NULLIF(eq.sku, ''), 'б/а') || ')',
+                            ', '
+                        )
+                        FROM equipment_parts ep
+                        JOIN equipment eq ON ep.equipment_id = eq.id WHERE ep.part_id = p.id
+                    ) as equipment_list,
                    p.analog_group_id,
                    (
                         SELECT COUNT(*)
@@ -988,10 +1024,10 @@ class Database:
 
         formatted: list[str] = []
         for row in rows:
-            # sqlite3.Row поддерживает доступ как по индексу, так и по ключу.
+            name = row["name"] if row else ""
             sku = row["sku"] if row else None
-            display_value = sku if sku else "б/а"
-            formatted.append(display_value)
+            sku_display = sku if sku else "б/а"
+            formatted.append(f"{name} ({sku_display})")
 
         return ", ".join(formatted)
 
@@ -1484,6 +1520,79 @@ class Database:
             self._log_action(f"Обновлено оборудование #{eq_id}: {name} (артикул: {sku or 'нет'})")
             return True, "Данные оборудования обновлены."
         except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+
+    def copy_equipment_with_parts(self, equipment_id: int, copies: int = 1):
+        if not self.conn:
+            return False, "Нет подключения к базе данных.", []
+
+        if copies < 1:
+            return False, "Количество копий должно быть не меньше 1.", []
+
+        source = self.fetchone(
+            "SELECT name, sku, category_id, parent_id, comment FROM equipment WHERE id = ?",
+            (equipment_id,),
+        )
+        if not source:
+            return False, "Оборудование не найдено.", []
+
+        parts = self.fetchall(
+            """
+                SELECT part_id, installed_qty, comment, last_replacement_override, requires_replacement
+                FROM equipment_parts
+                WHERE equipment_id = ?
+            """,
+            (equipment_id,),
+        ) or []
+
+        if not self._ensure_equipment_parts_requires_column(update_schema_version=False):
+            return False, "Не удалось подготовить таблицу связей запчастей.", []
+
+        new_ids: list[int] = []
+
+        try:
+            with self.conn:
+                for idx in range(1, copies + 1):
+                    suffix = " (копия)" if copies == 1 else f" (копия {idx})"
+                    new_name = f"{source['name']}{suffix}"
+                    cursor = self.execute(
+                        "INSERT INTO equipment (name, sku, category_id, parent_id, comment) VALUES (?, ?, ?, ?, ?)",
+                        (
+                            new_name,
+                            source.get("sku"),
+                            source.get("category_id"),
+                            source.get("parent_id"),
+                            source.get("comment"),
+                        ),
+                    )
+                    if cursor is None:
+                        raise sqlite3.Error("Не удалось создать копию оборудования")
+                    new_equipment_id = cursor.lastrowid
+                    new_ids.append(int(new_equipment_id))
+
+                    for part in parts:
+                        self.execute(
+                            """
+                                INSERT INTO equipment_parts (
+                                    equipment_id, part_id, installed_qty, comment, last_replacement_override, requires_replacement
+                                ) VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            (
+                                new_equipment_id,
+                                part.get("part_id"),
+                                part.get("installed_qty", 1),
+                                part.get("comment"),
+                                part.get("last_replacement_override"),
+                                1 if part.get("requires_replacement") else 0,
+                            ),
+                        )
+
+            self._log_action(
+                f"Скопировано оборудование #{equipment_id} {copies} раз(а): {', '.join(map(str, new_ids))}"
+            )
+            return True, "Копия оборудования создана.", new_ids
+        except sqlite3.Error as exc:
+            logging.error("Ошибка при копировании оборудования #%s: %s", equipment_id, exc, exc_info=True)
+            return False, f"Ошибка базы данных: {exc}", []
 
     def update_equipment_comment(self, eq_id: int, comment: str):
         if not self.conn:
@@ -2976,10 +3085,7 @@ class Database:
                 COALESCE(kt.installation_state, CASE kt.status WHEN 'в работе' THEN 'установлен' ELSE 'снят' END) AS installation_state,
                 (
                     SELECT GROUP_CONCAT(
-                        CASE
-                            WHEN eq.sku IS NOT NULL AND eq.sku != '' THEN eq.sku
-                            ELSE 'б/а'
-                        END,
+                        eq.name || ' (' || COALESCE(NULLIF(eq.sku, ''), 'б/а') || ')',
                         ', '
                     )
                     FROM equipment_parts ep
