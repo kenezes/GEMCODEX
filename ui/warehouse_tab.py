@@ -162,25 +162,18 @@ class WarehouseTab(QWidget):
         self.table_view.customContextMenuRequested.connect(self.show_context_menu)
         self.table_view.doubleClicked.connect(self.edit_part_from_table)
         self.table_view.clicked.connect(self._on_table_clicked)
-        
-        # Автоширина колонок
+
         header = self.table_view.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
         header.setStretchLastSection(False)
-        header.resizeSection(0, 260)
-        header.resizeSection(1, 140)
-        header.resizeSection(2, 90)
-        header.resizeSection(3, 100)
-        header.resizeSection(4, 120)
-        header.resizeSection(5, 160)
-        header.resizeSection(6, 200)
+        header.setMinimumSectionSize(60)
+        header.setSectionResizeMode(TableModel.FOLDER_COLUMN, QHeaderView.ResizeToContents)
 
         apply_table_compact_style(self.table_view)
 
         self.folder_delegate = FolderButtonDelegate(self.table_view)
         self.folder_delegate.clicked.connect(self.open_part_folder_from_table)
         self.table_view.setItemDelegateForColumn(TableModel.FOLDER_COLUMN, self.folder_delegate)
-        self.table_view.setColumnWidth(TableModel.FOLDER_COLUMN, 100)
 
     def load_categories(self):
         current_selection = self._get_selected_category_token()
@@ -424,6 +417,15 @@ class TableModel(QAbstractTableModel):
                 return QColor('#fafafa')
             return None
 
+        if row_type == 'analog_separator':
+            if role == Qt.DisplayRole:
+                return ""
+            if role == Qt.SizeHintRole:
+                return QSize(-1, 10)
+            if role == Qt.BackgroundRole:
+                return QColor(0, 0, 0, 0)
+            return None
+
         part = row_entry.get('part', {})
         analog_group_id = part.get('analog_group_id')
         analog_group_size = part.get('analog_group_size') or 0
@@ -485,6 +487,8 @@ class TableModel(QAbstractTableModel):
             return Qt.ItemIsEnabled
         if self._rows[index.row()].get('row_type') == 'category':
             return Qt.ItemIsEnabled
+        if self._rows[index.row()].get('row_type') == 'analog_separator':
+            return Qt.NoItemFlags
         return super().flags(index)
 
     def set_parts(self, parts: list[dict]):
@@ -583,6 +587,8 @@ class TableModel(QAbstractTableModel):
 
         rows: list[dict] = []
         current_category: Optional[str] = None
+        last_analog_key: Optional[int] = None
+        has_parts_in_category = False
 
         for part in filtered:
             category_name = part.get('category_name') or ''
@@ -590,7 +596,21 @@ class TableModel(QAbstractTableModel):
                 label = category_name if category_name else 'Без категории'
                 rows.append({'row_type': 'category', 'category_name': label})
                 current_category = category_name
+                last_analog_key = None
+                has_parts_in_category = False
+
+            analog_group_id = part.get('analog_group_id')
+            analog_group_size = part.get('analog_group_size') or 0
+            analog_key: Optional[int] = None
+            if analog_group_id and analog_group_size > 1:
+                analog_key = int(analog_group_id)
+
+            if analog_key and has_parts_in_category and analog_key != last_analog_key:
+                rows.append({'row_type': 'analog_separator'})
+
             rows.append({'row_type': 'part', 'part': part})
+            has_parts_in_category = True
+            last_analog_key = analog_key
             part_id = part.get('id')
             if include_expanded and isinstance(part_id, int) and part_id in self._expanded_parts:
                 for equipment in part.get('equipment_links') or []:

@@ -1608,18 +1608,68 @@ class Database:
             logging.error("Ошибка обновления комментария оборудования #%s: %s", eq_id, e, exc_info=True)
             return False, f"Ошибка базы данных: {e}"
     def delete_equipment(self, eq_id):
-        if self.fetchone("SELECT 1 FROM equipment_parts WHERE equipment_id = ?", (eq_id,)): return False, "Удаление невозможно: к оборудованию привязаны запчасти."
-        if self.fetchone("SELECT 1 FROM replacements WHERE equipment_id = ?", (eq_id,)): return False, "Удаление невозможно: оборудование фигурирует в истории замен."
+        if not self.conn:
+            return False, "Нет подключения к БД."
+
+        def _collect_subtree(root_id: int) -> list[int]:
+            equipment_rows = self.get_all_equipment()
+            children_map: dict[int | None, list[int]] = {}
+            for row in equipment_rows:
+                parent = row.get("parent_id")
+                children_map.setdefault(parent, []).append(row["id"])
+
+            subtree: list[int] = []
+            stack = [root_id]
+            seen: set[int] = set()
+            while stack:
+                current = stack.pop()
+                if current in seen:
+                    continue
+                seen.add(current)
+                subtree.append(current)
+                stack.extend(children_map.get(current, []))
+            return subtree
+
+        equipment = self.fetchone("SELECT name, sku FROM equipment WHERE id = ?", (eq_id,))
+        subtree_ids = _collect_subtree(eq_id)
+        if not subtree_ids:
+            return False, "Оборудование не найдено."
+
+        placeholders = ",".join("?" for _ in subtree_ids)
+        params = tuple(subtree_ids)
+
         try:
-            equipment = self.fetchone("SELECT name, sku FROM equipment WHERE id = ?", (eq_id,))
-            self.execute("DELETE FROM equipment WHERE id = ?", (eq_id,))
-            if self.conn: self.conn.commit()
+            with self.conn:
+                cursor = self.conn.cursor()
+                cursor.execute(
+                    f"DELETE FROM equipment_parts WHERE equipment_id IN ({placeholders})",
+                    params,
+                )
+                cursor.execute(
+                    f"DELETE FROM replacements WHERE equipment_id IN ({placeholders})",
+                    params,
+                )
+                cursor.execute(
+                    f"UPDATE tasks SET equipment_id = NULL WHERE equipment_id IN ({placeholders})",
+                    params,
+                )
+                cursor.execute("DELETE FROM equipment WHERE id = ?", (eq_id,))
+
+            removed_children = len(subtree_ids) - 1
             if equipment:
-                self._log_action(f"Удалено оборудование #{eq_id}: {equipment['name']} (артикул: {equipment['sku'] or 'нет'})")
+                details = f"{equipment['name']} (артикул: {equipment['sku'] or 'нет'})"
+                self._log_action(
+                    f"Удалено оборудование #{eq_id}: {details}. Удалено дочерних узлов: {removed_children}"
+                )
             else:
-                self._log_action(f"Удалено оборудование #{eq_id}")
-            return True, "Оборудование удалено."
-        except sqlite3.Error as e: return False, f"Ошибка базы данных: {e}"
+                self._log_action(
+                    f"Удалено оборудование #{eq_id}. Удалено дочерних узлов: {removed_children}"
+                )
+            return True, "Оборудование и связанные записи удалены без изменения складских остатков."
+        except sqlite3.Error as e:
+            logging.error("Ошибка удаления оборудования #%s: %s", eq_id, e, exc_info=True)
+            return False, f"Ошибка базы данных: {e}"
+
     def get_parts_for_equipment(self, equipment_id):
         query = """
             SELECT ep.id as equipment_part_id,
