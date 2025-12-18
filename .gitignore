@@ -1,6 +1,7 @@
 **/logs
 *.log
 **/data
+**/backup
 **/__pycache__
 *.pyc
 **/ui/__pycache__
