@@ -130,7 +130,7 @@ class OrdersFilterProxyModel(QSortFilterProxyModel):
         index = self.sourceModel().index(source_row, OrdersTableModel.STATUS_COLUMN, source_parent)
         status = self.sourceModel().data(index) or ""
         normalized = str(status).strip().lower().replace('ё', 'е')
-        return not any(keyword in normalized for keyword in ("принят", "отменен"))
+        return not any(keyword in normalized for keyword in ("принят", "отменен", "отменена"))
 
 class OrdersTab(QWidget):
     """Вкладка для управления заказами."""
@@ -153,9 +153,11 @@ class OrdersTab(QWidget):
         
         self._setup_toolbar()
         self._setup_table()
-        
+
         layout.addWidget(self.toolbar)
         layout.addWidget(self.table_view)
+
+        self.hide_completed_checkbox.setChecked(True)
 
     def _setup_toolbar(self):
         self.toolbar = QToolBar()
@@ -208,6 +210,7 @@ class OrdersTab(QWidget):
         self.delete_order_button.clicked.connect(self.delete_selected_order)
         self.refresh_button.clicked.connect(self.refresh_data)
         self.hide_completed_checkbox.stateChanged.connect(self.toggle_hide_completed)
+
 
     def _setup_table(self):
         self.base_model = OrdersTableModel()
